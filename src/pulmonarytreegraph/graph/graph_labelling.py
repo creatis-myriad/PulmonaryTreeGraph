@@ -229,7 +229,6 @@ def _create_hierarchical_levels(
             continue
         processed_edges.add(edge_key)
 
-        # Cache edge data lookup
         edge_data = graph.edges[parent_node, current_node]
 
         # Process this edge
@@ -351,48 +350,77 @@ def _is_trunk_vessel(
     if parent_diameter == 0:
         return False
 
-    diameter_ratio = vessel_diameter / parent_diameter
-    is_trunk_diameter = diameter_ratio >= diameter_threshold
-
-    # Priority Rule 1: Early hierarchy - use only diameter
-    if parent_level is not None and parent_level <= 2:
-        is_trunk_diameter = (
-            diameter_ratio >= 0.5
-        )  # Adjusted threshold for early hierarchy
-        logger.debug(
-            "Early hierarchy vessel: %s, diameter ratio: %s, trunk: %s",
-            vessel_lobe,
-            diameter_ratio,
-            is_trunk_diameter,
-        )
-        return is_trunk_diameter
-
-    # Priority Rule 2: Lower lobes - use only diameter for level 3
-    if vessel_lobe in ["RLL", "LLL"] and parent_level == 3:
-        # Lower lobes typically have larger diameters
-        is_trunk_diameter = diameter_ratio >= diameter_threshold
-        logger.debug(
-            "Lower lobe vessel: %s, diameter ratio: %s, trunk: %s",
-            vessel_lobe,
-            diameter_ratio,
-            is_trunk_diameter,
-        )
-        return is_trunk_diameter
-
-    # Standard case - use both criteria
     if vessel_diameter == 0:
         return False
 
+    diameter_ratio = vessel_diameter / parent_diameter
+    is_trunk_diameter = diameter_ratio >= diameter_threshold
     length_ratio = vessel_length / vessel_diameter
     is_trunk_length = length_ratio <= length_threshold
-    result = is_trunk_diameter and is_trunk_length
+
+    # Priority Rule 1: Early hierarchy - use only diameter
+    # if parent_level is not None and parent_level <= 2:
+    #    is_trunk_diameter = (
+    #        diameter_ratio >= 0.5
+    #    )  # Adjusted threshold for early hierarchy
+    #    logger.debug(
+    #        "Early hierarchy vessel: %s, diameter ratio: %s, trunk: %s",
+    #        vessel_lobe,
+    #        diameter_ratio,
+    #        is_trunk_diameter,
+    #    )
+    #    return is_trunk_diameter
+
+    # fixed threshold for upper lobes
+    if vessel_lobe in ["RUL", "LUL", "RML"]:
+        if parent_level is not None and parent_level <= 2:
+            is_trunk_diameter = diameter_ratio >= 0.5
+            is_trunk_length = length_ratio <= 2.5
+            return is_trunk_diameter or is_trunk_length
+        # elif parent_level is not None and parent_level >= 3:
+        #    is_trunk_diameter = diameter_ratio >= 0.
+        #    is_trunk_length = length_ratio <= 1.5
+        #    return is_trunk_diameter or is_trunk_length
+        elif parent_level is not None and parent_level >= 3:
+            is_trunk_diameter = diameter_ratio >= 0.7
+            is_trunk_length = length_ratio <= 2.5
+            return is_trunk_diameter and is_trunk_length
+
+    else:  # Lower lobes (RLL/LLL) or interlobar vessels
+        # Use standard thresholds for lower lobes
+        is_trunk_diameter = diameter_ratio >= 0.5
+        is_trunk_length = length_ratio <= 2.5
+        return is_trunk_diameter and is_trunk_length
+
+
+def _is_trunk_vessel_simple_rule(
+    vessel_diameter: float,
+    vessel_length: float,
+    parent_diameter: float,
+    vessel_lobe: str,
+    diameter_threshold: float,
+    length_threshold: float,
+    parent_level: int = None,
+) -> bool:
+    """
+    Determine if a vessel is a trunk vessel using hierarchical and lobe-specific rules.
+
+
+    """
+    if parent_diameter == 0:
+        return False
+
+    if vessel_diameter == 0:
+        return False
+
+    diameter_ratio = vessel_diameter / parent_diameter
+    is_trunk_diameter = diameter_ratio >= diameter_threshold
+
     logger.debug(
-        "Applying standard rule: diameter=%s, length=%s, result=%s",
+        "Applying standard rule: diameter=%s",
         is_trunk_diameter,
-        is_trunk_length,
-        result,
     )
-    return result
+    return is_trunk_diameter
 
 
 def _count_segments_by_linear_chains(
@@ -714,11 +742,111 @@ def label_graph(
     _mark_interlobar_vessels(graph)
 
     # Step 6: Create hierarchical levels based on bifurcation rules with configurable thresholds
-    logger.debug("Starting hierarchical level creation...")
+    # logger.debug("Starting hierarchical level creation...")
     _create_hierarchical_levels(graph, diameter_threshold, length_threshold)
+
+    # Step 7: Label segments based on vessel properties
+    # _label_segments(graph)
 
     # Add level summary
     _print_level_summary(graph)
 
     logger.info("Labeling complete")
     return graph
+
+
+def _get_lobe_max_diameter(graph: nx.DiGraph) -> dict[str, float]:
+    """Get the maximum diameter for each lobe to use for relative size calculations."""
+    lobe_max_diameter = {}
+
+    for _, _, edge_data in graph.edges(data=True):
+        lobe = edge_data.get("lobe", "unknown")
+        if lobe not in ["interlobar", "unknown", "None"]:
+            diameter = edge_data.get("mean_radius", 0) * 2
+            if diameter > 0:
+                lobe_max_diameter[lobe] = max(lobe_max_diameter.get(lobe, 0), diameter)
+
+    return lobe_max_diameter
+
+
+def _label_segments(graph: nx.DiGraph) -> None:
+    """Label segments based on vessel properties."""
+    logger.info("Starting segmental labeling")
+
+    # Get maximum diameter for each lobe
+    lobe_max_diameter = _get_lobe_max_diameter(graph)
+    logger.debug("Maximum diameter by lobe: %s", lobe_max_diameter)
+
+    segments_labeled = 0
+
+    for node1, node2 in graph.edges:
+        edge_data = graph.edges[node1, node2]
+
+        # Only process level 3 vessels that are not interlobar
+        if edge_data.get("level") != 3 or edge_data.get("lobe") == "interlobar":
+            continue
+
+        # Get parent edge
+        parents = list(graph.predecessors(node1))
+        if not parents:
+            continue
+
+        parent_edge = (parents[0], node1)
+        parent_data = graph.edges[parent_edge]
+
+        # Calculate vessel properties
+        vessel_diameter = edge_data.get("mean_radius", 0) * 2
+        vessel_length = edge_data.get("length", 0)
+        parent_diameter = parent_data.get("mean_radius", 0) * 2
+        vessel_lobe = edge_data.get("lobe", "unknown")
+
+        # Skip if invalid data
+        if (
+            vessel_diameter == 0
+            or parent_diameter == 0
+            or vessel_lobe not in lobe_max_diameter
+        ):
+            continue
+
+        # Calculate ratios
+        length_diameter_ratio = vessel_length / vessel_diameter
+        parent_ratio = vessel_diameter / parent_diameter
+        lobe_ratio = vessel_diameter / lobe_max_diameter[vessel_lobe]
+
+        # Apply lobe-specific segmentation criteria
+        parent_level = parent_data.get("level", 3)
+        if parent_level >= 4:
+            # Handle vessels with high-level parents
+            if length_diameter_ratio >= 2:
+                edge_data["level"] = parent_level + 1
+            else:
+                edge_data["level"] = parent_level
+            edge_data["name"] = f"{vessel_lobe} {edge_data['level']} {node1} {node2}"
+        else:
+            is_segment = False
+
+            if vessel_lobe in ["RUL", "LUL"]:
+                # Upper lobes have more permissive criteria
+                is_segment = length_diameter_ratio > 1 and (
+                    parent_ratio < 0.7 or lobe_ratio < 0.7
+                )
+            elif vessel_lobe in ["RML"]:
+                # Middle lobe has intermediate criteria
+                is_segment = length_diameter_ratio > 1 and (
+                    parent_ratio < 0.7 or lobe_ratio < 0.7
+                )
+            else:
+                # Lower lobes (RLL, LLL) have stricter criteria
+                is_segment = length_diameter_ratio > 1 and (
+                    parent_ratio < 0.7 or lobe_ratio < 0.7
+                )
+
+            if is_segment:
+                edge_data["level"] = 4
+                edge_data["name"] = f"{vessel_lobe} Segment {node1} {node2}"
+                logger.debug(
+                    "Labeled as segment in %s: %s-%s", vessel_lobe, node1, node2
+                )
+                segments_labeled += 1
+
+    logger.info("Labeled %d segments in total", segments_labeled)
