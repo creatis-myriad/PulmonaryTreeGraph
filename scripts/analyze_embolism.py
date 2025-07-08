@@ -7,11 +7,9 @@ import logging
 import sys
 from pathlib import Path
 
-from pulmonarytreegraph.emboli.embolie_analysis import (
-    analyze_embolisms_with_visualization,
-)
 from pulmonarytreegraph.pipeline.core import (
-    analyze_embolism_regions_with_graph_enrichment,
+    analyze_embolisms_complete,
+    analyze_embolisms_with_visualization,
 )
 
 
@@ -47,15 +45,26 @@ def main():
     # Analysis options
     parser.add_argument(
         "--separation-method",
-        choices=["connected_components", "connected_components_with_threshold"],
-        default="connected_components_with_threshold",
+        choices=["connected_components", "watershed"],
+        default="connected_components",
         help="Method for separating embolisms (default: connected_components)",
     )
     parser.add_argument(
         "--fusion-threshold",
         type=float,
         default=10.0,
-        help="Distance threshold for fusing nearby components in voxels (default: 10.0)",
+        help="Distance threshold for fusing nearby components in mm (default: 10.0)",
+    )
+    parser.add_argument(
+        "--compute-transversal-obstruction",
+        action="store_true",
+        help="Compute transversal obstruction metrics for each vessel segment",
+    )
+    parser.add_argument(
+        "--include-colored-masks",
+        action="store_true",
+        default=True,
+        help="Create colored visualization masks (default: True)",
     )
 
     # Vessel interaction analysis
@@ -66,6 +75,17 @@ def main():
         "--vessel-graph", help="Path to vessel graph file for advanced analysis"
     )
     parser.add_argument("--level-mask", help="Path to labeled anatomical level mask")
+    parser.add_argument(
+        "--disable-vessel-analysis",
+        action="store_true",
+        help="Disable vessel interaction analysis even if vessel data is provided",
+    )
+    parser.add_argument(
+        "--coordinate-format",
+        choices=["voxel", "real", "both"],
+        default="both",
+        help="Coordinate format for saved graphs (default: both)",
+    )
 
     # Verbose output
     parser.add_argument(
@@ -106,14 +126,24 @@ def main():
     logger.info("Input mask: %s", args.embolism_mask)
     logger.info("Output directory: %s", output_dir)
     logger.info("Separation method: %s", args.separation_method)
-    if args.separation_method == "connected_components_with_threshold":
-        logger.info("Fusion threshold: %.1f voxels", args.fusion_threshold)
+    logger.info("Fusion threshold: %.1f mm", args.fusion_threshold)
 
     try:
-        if args.vessel_mask or args.vessel_graph:
-            logger.info("Running pipeline with vessel graph/mask enrichment")
-            results = analyze_embolism_regions_with_graph_enrichment(
-                mask_path=args.embolism_mask,
+        # Determine whether to use vessel analysis
+        compute_vessel_analysis = (
+            args.vessel_mask or args.vessel_graph
+        ) and not args.disable_vessel_analysis
+
+        if compute_vessel_analysis:
+            logger.info("Running complete pipeline with vessel analysis")
+
+            # Prepare transversal obstruction kwargs if needed
+            transversal_obstruction_kwargs = None
+            if args.compute_transversal_obstruction:
+                transversal_obstruction_kwargs = {}  # Add any specific parameters here
+
+            results = analyze_embolisms_complete(
+                embolism_mask_path=args.embolism_mask,
                 patient_name=patient_name,
                 output_dir=output_dir,
                 vessel_graph_path=args.vessel_graph,
@@ -121,7 +151,11 @@ def main():
                 level_mask_path=args.level_mask,
                 separation_method=args.separation_method,
                 fusion_threshold=args.fusion_threshold,
-                include_colored_masks=True,
+                include_colored_masks=args.include_colored_masks,
+                compute_vessel_analysis=True,
+                compute_transversal_obstruction=args.compute_transversal_obstruction,
+                transversal_obstruction_kwargs=transversal_obstruction_kwargs,
+                coordinate_format=args.coordinate_format,
             )
         else:
             logger.info("Running basic pipeline analysis")
@@ -131,6 +165,7 @@ def main():
                 output_dir=output_dir,
                 separation_method=args.separation_method,
                 fusion_threshold=args.fusion_threshold,
+                include_colored_masks=args.include_colored_masks,
             )
 
         # Output summary
@@ -166,6 +201,15 @@ def main():
                     logger.info(
                         "  %s: %s", file_type.replace("_", " ").title(), file_path
                     )
+
+        # Additional information for complete analysis
+        if compute_vessel_analysis and results.get("vessel_analysis_performed", False):
+            logger.info("Vessel analysis results:")
+            logger.info("  Analysis type: %s", results.get("analysis_type", "unknown"))
+            if "enriched_vessel_graph" in results:
+                logger.info("  Enriched vessel graph generated")
+            if args.compute_transversal_obstruction:
+                logger.info("  Transversal obstruction analysis completed")
 
         logger.info("Analysis completed successfully!")
         return True

@@ -115,26 +115,22 @@ def generate_mask_metadata(
     return metadata
 
 
-def _ndarray_to_list(data):
-    """
-    Recursively convert numpy arrays to lists in nested data structures.
-
-    Parameters:
-    - data: Data structure that may contain numpy arrays
-
-    Returns:
-    - Data structure with numpy arrays converted to lists
-    """
-    if isinstance(data, np.ndarray):
-        return data.tolist()
-    elif isinstance(data, dict):
-        return {key: _ndarray_to_list(value) for key, value in data.items()}
-    elif isinstance(data, list):
-        return [_ndarray_to_list(item) for item in data]
-    elif isinstance(data, tuple):
-        return tuple(_ndarray_to_list(item) for item in data)
+def ndarray_to_list(obj):
+    """Convert numpy arrays to lists recursively for JSON serialization."""
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, dict):
+        return {key: ndarray_to_list(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [ndarray_to_list(item) for item in obj]
+    elif isinstance(obj, tuple):
+        return tuple(ndarray_to_list(item) for item in obj)
     else:
-        return data
+        return obj
 
 
 def save_graph(graph, path: str) -> None:
@@ -149,7 +145,7 @@ def save_graph(graph, path: str) -> None:
     data = nx.readwrite.json_graph.node_link_data(graph, edges="links")
 
     # Convert all numpy arrays to lists recursively
-    data_list = _ndarray_to_list(data)
+    data_list = ndarray_to_list(data)
 
     # Save to JSON file
     with open(path, "w", encoding="utf-8") as f:
@@ -354,7 +350,7 @@ def save_skeleton_from_graph(
     header.set_data_dtype(np.uint8)
 
     # Save the recreated skeleton
-    save_mask(skeleton, header, affine, output_path)
+    save_mask(skeleton.astype(np.uint32), header, affine, output_path)
 
 
 def compare_skeletons(original: np.ndarray, recreated: np.ndarray) -> dict[str, Any]:
@@ -477,6 +473,9 @@ def recreate_colored_skeleton_from_graph(
                 ):
                     skeleton[x, y, z] = color_value
 
+    # Ensure skeleton is of type uint16 for more labels
+    skeleton = skeleton.astype(np.uint32)
+
     return skeleton
 
 
@@ -521,7 +520,7 @@ def save_colored_skeleton_from_graph(
     skeleton_header = header.copy()
     skeleton_header.set_data_dtype(np.uint16)  # Support more labels
 
-    save_mask(colored_skeleton, skeleton_header, affine, output_path)
+    save_mask(colored_skeleton.astype(np.uint32), skeleton_header, affine, output_path)
 
 
 def save_embolism_masks(
@@ -567,7 +566,7 @@ def save_embolism_masks(
                 output_dir, f"{patient_name}_embolism_{embolism_number}.nii.gz"
             )
 
-            save_mask(mask, header, affine, output_path)
+            save_mask(mask.astype(np.uint32), header, affine, output_path)
             saved_paths.append(output_path)
 
         except Exception as e:
@@ -685,7 +684,9 @@ def create_colored_embolism_masks(
             colored_header = header.copy()
             colored_header.set_data_dtype(np.uint16)
 
-            save_mask(colored_mask, colored_header, affine, output_path)
+            save_mask(
+                colored_mask.astype(np.uint32), colored_header, affine, output_path
+            )
             saved_paths.append(output_path)
 
         return saved_paths
@@ -694,13 +695,13 @@ def create_colored_embolism_masks(
         raise RuntimeError(f"Error creating colored embolism masks: {e}") from e
 
 
-def _iterative_vessel_expansion_from_skeleton(
+def _iterative_vessel_expansion_from_skeleton_pronblem(
     labeled_skeleton: np.ndarray,
     arteries_mask: np.ndarray,
     initial_distance: int = 5,
     subsequent_distance: int = 2,
     max_iterations: int = 20,
-    force_complete_coverage: bool = True,
+    force_complete_coverage: bool = False,
 ) -> np.ndarray:
     """
     Expand vessel labels from skeleton by iteratively growing labels into artery volume.
@@ -845,6 +846,212 @@ def _iterative_vessel_expansion_from_skeleton(
         raise
 
 
+def _iterative_vessel_expansion_from_skeleton_fail(
+    labeled_skeleton: np.ndarray,
+    arteries_mask: np.ndarray,
+    initial_distance: int = 5,
+    subsequent_distance: int = 2,
+    max_iterations: int = 20,
+    force_complete_coverage: bool = False,
+) -> np.ndarray:
+    """
+    Create expanded vessel labels by iteratively expanding labeled skeleton.
+
+    Parameters:
+    - labeled_skeleton: Labeled skeleton array
+    - arteries_mask: Binary mask of arteries volume
+    - initial_distance: Distance for initial expansion
+    - subsequent_distance: Distance for subsequent expansions
+    - max_iterations: Maximum number of expansion iterations
+
+    Returns:
+    - Expanded vessel labels as numpy array
+    """
+    try:
+        logger.debug(f"Expanding labels with initial distance={initial_distance}")
+        expanded = expand_labels(labeled_skeleton, distance=initial_distance)
+        expanded[arteries_mask == 0] = 0
+
+        valid_pixels = np.sum(arteries_mask > 0)
+        labeled_pixels = np.sum(expanded > 0)
+        coverage = (labeled_pixels / valid_pixels) * 100
+        logger.debug(f"Initial expansion covers {coverage:.2f}% of artery mask")
+
+        iteration = 0
+        previous_coverage = coverage
+
+        while iteration < max_iterations and coverage < 100.0:
+            distance = subsequent_distance
+            logger.debug(f"Iteration {iteration+1}: Expanding with distance={distance}")
+
+            expanded = expand_labels(expanded, distance=distance)
+            expanded[arteries_mask == 0] = 0
+
+            labeled_pixels = np.sum(expanded > 0)
+            coverage = (labeled_pixels / valid_pixels) * 100
+            coverage_improvement = coverage - previous_coverage
+
+            logger.debug(
+                f"Iteration {iteration+1}: Now covers {coverage:.2f}% of artery mask (+{coverage_improvement:.2f}%)"
+            )
+
+            if coverage == 100.0:
+                logger.debug(f"Achieved 100% coverage in {iteration+1} iterations")
+                break
+
+            previous_coverage = coverage
+            iteration += 1
+
+            if coverage_improvement <= 0:
+                logger.warning(
+                    f"Coverage not improving after {iteration+1} iterations. Final coverage: {coverage:.2f}%"
+                )
+                break
+
+        return expanded
+    except Exception as e:
+        logger.error(f"Error expanding vessel labels: {e}")
+        raise
+
+
+def _iterative_vessel_expansion_from_skeleton(
+    labeled_skeleton: np.ndarray,
+    arteries_mask: np.ndarray,
+    initial_distance: int = 8,  # Increased from 5
+    subsequent_distance: int = 3,  # Increased from 2
+    max_iterations: int = 50,  # Increased from 20
+    force_complete_coverage: bool = False,
+    adaptive_distance: bool = True,  # New parameter
+    min_improvement_threshold: float = 0.01,  # New parameter
+) -> np.ndarray:
+    """
+    Create expanded vessel labels by iteratively expanding labeled skeleton.
+
+    Parameters:
+    - labeled_skeleton: Labeled skeleton array
+    - arteries_mask: Binary mask of arteries volume
+    - initial_distance: Distance for initial expansion
+    - subsequent_distance: Distance for subsequent expansions
+    - max_iterations: Maximum number of expansion iterations
+    - force_complete_coverage: If True, continue until 100% coverage
+    - adaptive_distance: If True, increase distance when progress stalls
+    - min_improvement_threshold: Minimum improvement to continue (%)
+
+    Returns:
+    - Expanded vessel labels as numpy array
+    """
+    try:
+        logger.debug(f"Expanding labels with initial distance={initial_distance}")
+        expanded = expand_labels(labeled_skeleton, distance=initial_distance)
+        expanded[arteries_mask == 0] = 0
+
+        valid_pixels = np.sum(arteries_mask > 0)
+        labeled_pixels = np.sum(expanded > 0)
+        coverage = (labeled_pixels / valid_pixels) * 100
+
+        logger.debug(f"Initial expansion covers {coverage:.2f}% of artery mask")
+
+        iteration = 0
+        previous_coverage = coverage
+        current_distance = subsequent_distance
+        stall_count = 0
+
+        while iteration < max_iterations:
+            # Check if we've achieved complete coverage
+            if coverage >= 100.0:
+                logger.debug(f"Achieved 100% coverage in {iteration} iterations")
+                break
+
+            # If not forcing complete coverage and we're close enough, break
+            if not force_complete_coverage and coverage > 99.5:
+                logger.debug(f"Near-complete coverage achieved: {coverage:.2f}%")
+                break
+
+            logger.debug(
+                f"Iteration {iteration+1}: Expanding with distance={current_distance}"
+            )
+            expanded = expand_labels(expanded, distance=current_distance)
+            expanded[arteries_mask == 0] = 0
+
+            labeled_pixels = np.sum(expanded > 0)
+            coverage = (labeled_pixels / valid_pixels) * 100
+            coverage_improvement = coverage - previous_coverage
+
+            logger.debug(
+                f"Iteration {iteration+1}: Now covers {coverage:.2f}% of artery mask (+{coverage_improvement:.2f}%)"
+            )
+
+            # Check for improvement
+            if coverage_improvement <= min_improvement_threshold:
+                stall_count += 1
+                logger.debug(f"Low improvement detected (stall count: {stall_count})")
+
+                if adaptive_distance and stall_count >= 2:
+                    # Increase expansion distance when progress stalls
+                    old_distance = current_distance
+                    current_distance = min(
+                        current_distance + subsequent_distance, 10
+                    )  # Cap at 10
+                    logger.debug(
+                        f"Increasing expansion distance from {old_distance} to {current_distance}"
+                    )
+                    stall_count = 0  # Reset stall count after increasing distance
+                elif stall_count >= 5:
+                    # Give up if no improvement for too many iterations
+                    logger.warning(
+                        f"Coverage not improving after {iteration+1} iterations. Final coverage: {coverage:.2f}%"
+                    )
+                    if not force_complete_coverage:
+                        break
+            else:
+                stall_count = 0  # Reset stall count on good improvement
+
+            previous_coverage = coverage
+            iteration += 1
+
+        # Final check and handling
+        final_labeled_pixels = np.sum(expanded > 0)
+        final_coverage = (final_labeled_pixels / valid_pixels) * 100
+
+        logger.info(
+            f"Final expansion result: {final_labeled_pixels}/{valid_pixels} voxels ({final_coverage:.2f}% coverage)"
+        )
+
+        # If forcing complete coverage and we haven't achieved it, try more aggressive expansion
+        if force_complete_coverage and final_coverage < 100.0:
+            logger.warning(
+                "Attempting aggressive final expansion to reach 100% coverage"
+            )
+
+            # Find unlabeled voxels within the artery mask
+            unlabeled_artery_voxels = (arteries_mask > 0) & (expanded == 0)
+            unlabeled_count = np.sum(unlabeled_artery_voxels)
+
+            if unlabeled_count > 0:
+                logger.debug(
+                    f"Attempting to label {unlabeled_count} remaining unlabeled voxels"
+                )
+
+                # Try a very large expansion as last resort
+                final_expanded = expand_labels(expanded, distance=20)
+                final_expanded[arteries_mask == 0] = 0
+
+                final_labeled_pixels = np.sum(final_expanded > 0)
+                final_coverage = (final_labeled_pixels / valid_pixels) * 100
+
+                if final_coverage > coverage:
+                    expanded = final_expanded
+                    logger.debug(
+                        f"Aggressive expansion improved coverage to {final_coverage:.2f}%"
+                    )
+
+        return expanded
+
+    except Exception as e:
+        logger.error(f"Error expanding vessel labels: {e}")
+        raise
+
+
 def save_colored_vessel_volume_from_graph(
     graph: nx.Graph,
     reference_skeleton_path: str,
@@ -969,7 +1176,12 @@ def save_colored_vessel_volume_from_graph(
         logger.debug("Set output data type to support max label: %s", max_label)
 
         # Save result
-        save_mask(expanded_volume, output_header, skeleton_affine, output_path)
+        save_mask(
+            expanded_volume.astype(np.uint32),
+            output_header,
+            skeleton_affine,
+            output_path,
+        )
         logger.info("Successfully saved colored vessel volume to: %s", output_path)
 
     except (FileNotFoundError, ValueError, RuntimeError, OSError) as e:
