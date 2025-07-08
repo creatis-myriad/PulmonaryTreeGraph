@@ -97,6 +97,12 @@ def _combine_edge_segments(
     edge2_radius: np.ndarray,
 ) -> tuple[list, list]:
     """Combine two oriented edge segments, removing duplicate middle point."""
+    # Ensure inputs are numpy arrays
+    edge1_centerline = np.asarray(edge1_centerline)
+    edge2_centerline = np.asarray(edge2_centerline)
+    edge1_radius = np.asarray(edge1_radius)
+    edge2_radius = np.asarray(edge2_radius)
+
     if edge1_centerline.size > 0 and edge2_centerline.size > 0:
         # Remove duplicate middle point and concatenate
         combined_centerline = np.concatenate([edge1_centerline[:-1], edge2_centerline])
@@ -160,12 +166,14 @@ def _fuse_two_segments(
     edge1_radius = edge1_data.get("radius", [])
     edge2_radius = edge2_data.get("radius", [])
 
-    if len(edge1_centerline) > 0 and len(edge2_centerline) > 0:
-        # Convert to numpy arrays for manipulation
-        edge1_centerline = np.array(edge1_centerline)
-        edge2_centerline = np.array(edge2_centerline)
-        edge1_radius = np.array(edge1_radius)
-        edge2_radius = np.array(edge2_radius)
+    # Convert to numpy arrays and check if they contain data
+    edge1_centerline = np.asarray(edge1_centerline)
+    edge2_centerline = np.asarray(edge2_centerline)
+    edge1_radius = np.asarray(edge1_radius)
+    edge2_radius = np.asarray(edge2_radius)
+
+    if edge1_centerline.size > 0 and edge2_centerline.size > 0:
+        # Convert positions to numpy arrays for manipulation
         middle_pos = np.array(middle_pos)
         neighbor1_pos = np.array(neighbor1_pos)
         neighbor2_pos = np.array(neighbor2_pos)
@@ -202,7 +210,7 @@ def _fuse_two_segments(
     else:
         # Handle case with no centerline data
         combined_centerline = []
-        combined_radius = list(edge1_radius) + list(edge2_radius)
+        combined_radius = edge1_radius.tolist() + edge2_radius.tolist()
 
     # Create new edge data
     new_edge_data = _create_fused_edge_data(
