@@ -4,21 +4,16 @@ import logging
 import os
 from typing import Any
 
+import numpy as np
+
 from ..emboli.embolie_analysis import analyze_embolisms_with_visualization
 from ..graph.graph_cleaning import clean_graph
 from ..graph.graph_construction import mask_to_branch_graph
 from ..graph.graph_labelling import label_graph
 from ..graph.graph_orienting import orient_graph
-from ..graph_embolism_integration import (
-    analyze_embolism_by_levels,
-    analyze_embolism_vessel_interactions,
-    compute_embolism_vessel_metrics,
-    enrich_vessel_graph_with_embolisms,
-    get_embolism_vessel_statistics,
-    get_vessels_with_embolisms,
-    save_analysis_report,
-    save_level_analysis_results,
-    save_vessel_embolism_analysis,
+from ..graph_enrichment_with_embolism import (
+    full_graph_transversal_obstructions,
+    integrate_embolism_into_graph,
 )
 from ..preprocessing import create_skeleton_and_distance_map
 from ..utils.io import (
@@ -63,7 +58,7 @@ def preprocess_artery_mask(
     logger.info("Creating skeleton and distance map...")
     skeleton, distance_map = create_skeleton_and_distance_map(mask, spacing)
     skeleton_path = os.path.join(output_dir, "skeleton.nii.gz")
-    save_mask(skeleton.astype(mask.dtype), header, affine, skeleton_path)
+    save_mask(skeleton.astype(np.uint32), header, affine, skeleton_path)
     logger.info("Skeleton saved: %s", skeleton_path)
     distance_map_path = os.path.join(output_dir, "distance_map.nii.gz")
     save_mask(distance_map.astype(mask.dtype), header, affine, distance_map_path)
@@ -148,7 +143,12 @@ def build_graph_from_skeleton(
         recreated_skeleton = recreate_skeleton_from_graph(branch_graph, skeleton.shape)
         header_copy = header.copy()
         header_copy.set_data_dtype(skeleton.dtype)
-        save_mask(recreated_skeleton, header_copy, affine, binary_skeleton_path)
+        save_mask(
+            recreated_skeleton.astype(np.uint32),
+            header_copy,
+            affine,
+            binary_skeleton_path,
+        )
         skeleton_paths["binary"] = binary_skeleton_path
         logger.info("Branch graph skeleton (binary) saved: %s", binary_skeleton_path)
 
@@ -300,7 +300,12 @@ def clean_vessel_graph(
         )
         header_copy = header.copy()
         header_copy.set_data_dtype(skeleton_data.dtype)
-        save_mask(recreated_skeleton, header_copy, affine, binary_skeleton_path)
+        save_mask(
+            recreated_skeleton.astype(np.uint32),
+            header_copy,
+            affine,
+            binary_skeleton_path,
+        )
         skeleton_paths["binary"] = binary_skeleton_path
         logger.info("Cleaned graph skeleton (binary) saved: %s", binary_skeleton_path)
 
@@ -481,7 +486,12 @@ def orient_vessel_graph(
         )
         header_copy = header.copy()
         header_copy.set_data_dtype(skeleton_data.dtype)
-        save_mask(recreated_skeleton, header_copy, affine, binary_skeleton_path)
+        save_mask(
+            recreated_skeleton.astype(np.uint32),
+            header_copy,
+            affine,
+            binary_skeleton_path,
+        )
         skeleton_paths["binary"] = binary_skeleton_path
         logger.info("Oriented graph skeleton (binary) saved: %s", binary_skeleton_path)
 
@@ -699,7 +709,12 @@ def label_vessel_graph(
         )
         header_copy = header.copy()
         header_copy.set_data_dtype(skeleton_data.dtype)
-        save_mask(recreated_skeleton, header_copy, affine, binary_skeleton_path)
+        save_mask(
+            recreated_skeleton.astype(np.uint32),
+            header_copy,
+            affine,
+            binary_skeleton_path,
+        )
         skeleton_paths["binary"] = binary_skeleton_path
         logger.info("Labeled graph skeleton (binary) saved: %s", binary_skeleton_path)
 
@@ -793,61 +808,40 @@ def label_vessel_graph(
     }
 
 
-def analyze_embolism_regions_with_graph_enrichment(
-    mask_path: str,
+def analyze_embolisms_complete(
+    embolism_mask_path: str,
     patient_name: str,
     output_dir: str,
-    vessel_graph_path: str,
-    vessel_mask_path: str,
+    vessel_graph_path: str | None = None,
+    vessel_mask_path: str | None = None,
     level_mask_path: str | None = None,
     separation_method: str = "connected_components",
     fusion_threshold: float = 10.0,
     include_colored_masks: bool = True,
-    save_results: bool = True,
+    compute_vessel_analysis: bool = True,
+    compute_transversal_obstruction: bool = False,
+    transversal_obstruction_kwargs: dict | None = None,
+    coordinate_format: str = "both",
 ) -> dict[str, Any]:
     """
-    Complete pipeline for embolism analysis with vessel graph enrichment.
-
-    This function combines basic embolism analysis with vessel interaction analysis
-    and graph enrichment to provide comprehensive embolism-vessel relationship data.
-
-    Parameters:
-    - mask_path: Path to embolism mask file
-    - patient_name: Patient identifier
-    - output_dir: Output directory for results
-    - vessel_graph_path: Path to vessel graph file (NetworkX format)
-    - vessel_mask_path: Path to labeled vessel mask file
-    - level_mask_path: Path to labeled level mask (optional)
-    - separation_method: Method for separating embolisms
-    - fusion_threshold: Distance threshold for component fusion
-    - include_colored_masks: Whether to create colored visualization masks
-    - save_results: Whether to save results to files
-
-    Returns:
-    - Dictionary with comprehensive analysis results including:
-      - Basic embolism analysis results
-      - Vessel interaction results
-      - Enriched vessel graph
-      - Comprehensive statistics
-      - File paths to saved results
+    Embolism analysis pipeline with vessel graph enrichment using integrate_embolism_into_graph.
     """
-    logger.info(
-        "Starting comprehensive embolism analysis with graph enrichment for patient: %s",
-        patient_name,
-    )
-    logger.info("Embolism mask: %s", mask_path)
+    logger.info("=" * 50)
+    logger.info("EMBOLISM ANALYSIS PIPELINE (SIMPLE)")
+    logger.info("=" * 50)
+    logger.info("Patient: %s", patient_name)
+    logger.info("Embolism mask: %s", embolism_mask_path)
+    logger.info("Output directory: %s", output_dir)
     logger.info("Vessel graph: %s", vessel_graph_path)
     logger.info("Vessel mask: %s", vessel_mask_path)
-    logger.info("Output directory: %s", output_dir)
 
     try:
-        # Create output directory
         os.makedirs(output_dir, exist_ok=True)
 
-        # Step 1: Basic embolism analysis with visualization
-        logger.info("Step 1: Performing basic embolism analysis")
+        # Step 1: Basic embolism analysis
+        logger.info("STEP 1: Basic embolism analysis")
         basic_results = analyze_embolisms_with_visualization(
-            mask_path=mask_path,
+            mask_path=embolism_mask_path,
             patient_name=patient_name,
             output_dir=output_dir,
             separation_method=separation_method,
@@ -857,214 +851,82 @@ def analyze_embolism_regions_with_graph_enrichment(
 
         if basic_results["num_embolisms"] == 0:
             logger.warning("No embolisms found - returning basic results only")
-            return basic_results
+            return {
+                **basic_results,
+                "analysis_type": "basic_only",
+                "vessel_analysis_performed": False,
+                "reason": "no_embolisms_detected",
+            }
 
-        embolism_objects = basic_results["embolism_objects"]
-        logger.info(
-            "Found %d embolisms for vessel interaction analysis", len(embolism_objects)
+        # Step 2: Vessel graph enrichment (simple)
+        if not vessel_graph_path or not vessel_mask_path:
+            logger.warning("Vessel data not provided - returning basic results only")
+            return {
+                **basic_results,
+                "analysis_type": "basic_only",
+                "vessel_analysis_performed": False,
+                "reason": "missing_vessel_data",
+            }
+
+        logger.info("STEP 2: Vessel graph enrichment (simple)")
+        vessel_graph = load_graph(vessel_graph_path)
+        vessel_mask_data, _, vessel_spacing, _ = load_niftii(vessel_mask_path)
+
+        enriched_graph = integrate_embolism_into_graph(
+            vessel_graph,
+            vessel_mask_data,
+            basic_results["embolism_objects"],
+            vessel_spacing,
         )
 
-        # Step 2: Load vessel data
-        logger.info("Step 2: Loading vessel graph and mask data")
-
-        # Load vessel graph
-        try:
-            vessel_graph = load_graph(vessel_graph_path)
-            logger.info(
-                "Loaded vessel graph with %d nodes and %d edges",
-                len(vessel_graph.nodes),
-                len(vessel_graph.edges),
+        # Step 3: Optional transversal obstruction computation
+        if compute_transversal_obstruction:
+            logger.info("Computing transversal obstruction for vessel segments...")
+            # Load the embolism mask as obstruction_mask
+            obstruction_mask_data, _, _, _ = load_niftii(embolism_mask_path)
+            enriched_graph = full_graph_transversal_obstructions(
+                vessel_mask=vessel_mask_data,
+                obstruction_mask=obstruction_mask_data,
+                vessel_graph=enriched_graph,
+                vessel_mask_by_segment=True,
+                **(transversal_obstruction_kwargs or {}),
             )
-        except Exception as e:
-            logger.error("Failed to load vessel graph: %s", e)
-            raise RuntimeError(
-                f"Failed to load vessel graph from {vessel_graph_path}"
-            ) from e
+            logger.info("Transversal obstruction computation completed.")
 
-        # Load vessel mask
-        try:
-            vessel_mask_data, _, vessel_spacing, _ = load_niftii(vessel_mask_path)
-            logger.info(
-                "Loaded vessel mask with shape: %s and spacing: %s",
-                vessel_mask_data.shape,
-                vessel_spacing,
+        # Save the enriched graph
+        if coordinate_format == "both":
+            base_path = os.path.join(output_dir, "enriched_graph")
+            voxel_path, real_path = save_graph_dual_format(
+                enriched_graph, base_path, vessel_mask_path
             )
-        except Exception as e:
-            logger.error("Failed to load vessel mask: %s", e)
-            raise RuntimeError(
-                f"Failed to load vessel mask from {vessel_mask_path}"
-            ) from e
+            enriched_graph_paths = {"voxel": voxel_path, "real": real_path}
+        elif coordinate_format == "real":
+            enriched_graph_path = os.path.join(
+                output_dir, "enriched_graph_real_coords.json"
+            )
+            save_graph_with_real_coordinates(
+                enriched_graph, enriched_graph_path, vessel_mask_path
+            )
+            enriched_graph_paths = {"real": enriched_graph_path}
+        else:
+            enriched_graph_path = os.path.join(output_dir, "enriched_graph.json")
+            save_graph(enriched_graph, enriched_graph_path)
+            enriched_graph_paths = {"voxel": enriched_graph_path}
 
-        # Load level mask if provided
-        level_mask_data = None
-        if level_mask_path:
-            try:
-                level_mask_data, _, _, _ = load_niftii(level_mask_path)
-                logger.info("Loaded level mask with shape: %s", level_mask_data.shape)
-            except Exception as e:
-                logger.error("Failed to load level mask: %s", e)
-                raise RuntimeError(
-                    f"Failed to load level mask from {level_mask_path}"
-                ) from e
+        logger.info("Enriched vessel graph saved: %s", enriched_graph_paths)
 
-        # Step 3: Analyze vessel interactions
-        logger.info("Step 3: Analyzing embolism-vessel interactions")
-        interaction_results = analyze_embolism_vessel_interactions(
-            embolism_objects=embolism_objects,
-            vessel_mask=vessel_mask_data,
-            spacing=vessel_spacing,
-        )
-
-        # Step 4: Compute detailed vessel metrics
-        logger.info("Step 4: Computing detailed vessel metrics")
-        metrics_results = compute_embolism_vessel_metrics(
-            embolism_objects=embolism_objects,
-            vessel_mask=vessel_mask_data,
-            include_vessel_analysis=True,
-        )
-
-        # Step 5: Enrich vessel graph with embolism data
-        logger.info("Step 5: Enriching vessel graph with embolism data")
-        enriched_graph = enrich_vessel_graph_with_embolisms(
-            vessel_graph=vessel_graph,
-            embolism_objects=embolism_objects,
-            vessel_mask=vessel_mask_data,
-            interaction_results=interaction_results,
-        )
-
-        # Step 6: Generate comprehensive statistics
-        logger.info("Step 6: Generating comprehensive statistics")
-        vessel_embolism_stats = get_embolism_vessel_statistics(
-            interaction_results, metrics_results
-        )
-
-        # Step 7: Add level-based analysis if level mask is available
-        level_analysis = {}
-        if level_mask_data is not None:
-            logger.info("Step 7: Performing level-based analysis")
-            try:
-                level_analysis = analyze_embolism_by_levels(
-                    embolism_objects=embolism_objects,
-                    level_mask=level_mask_data,
-                )
-                logger.info(
-                    "Level analysis completed for %d levels",
-                    len(level_analysis.get("level_stats", {})),
-                )
-            except Exception as e:
-                logger.warning("Level analysis failed: %s", e)
-                level_analysis = {"error": str(e)}
-
-        # Step 8: Combine all results
-        logger.info("Step 8: Combining analysis results")
-        results = {
-            # Basic embolism analysis results
-            "patient_name": patient_name,
-            "num_embolisms": basic_results["num_embolisms"],
-            "total_volume_mm3": basic_results["total_volume_mm3"],
-            "total_volume_cm3": basic_results["total_volume_cm3"],
-            "embolism_objects": embolism_objects,
-            # Vessel interaction results
-            "vessel_interactions": interaction_results,
-            "vessel_metrics": metrics_results,
-            "enriched_vessel_graph": enriched_graph,
-            # Statistics and summaries
-            "vessel_embolism_statistics": vessel_embolism_stats,
-            "level_analysis": level_analysis,
-            # Summary statistics
-            "summary": {
-                "total_embolisms": len(embolism_objects),
-                "embolisms_affecting_vessels": sum(
-                    1 for r in interaction_results if r["num_affected_vessels"] > 0
-                ),
-                "total_vessel_interactions": sum(
-                    r["num_affected_vessels"] for r in interaction_results
-                ),
-                "unique_affected_vessels": len(
-                    set().union(
-                        *[
-                            r["affected_vessel_ids"]
-                            for r in interaction_results
-                            if r["affected_vessel_ids"]
-                        ]
-                    )
-                ),
-                "vessels_in_graph": enriched_graph.number_of_nodes(),
-                "vessels_with_embolisms": len(
-                    get_vessels_with_embolisms(enriched_graph)
-                ),
-                "percentage_vessels_affected": 0.0,
-            },
-            # File outputs
-            "output_files": basic_results.get("output_files", {}),
+        # Return results
+        return {
+            **basic_results,
+            "analysis_type": "simple_enrichment",
+            "vessel_analysis_performed": True,
+            "enriched_graph_paths": enriched_graph_paths,
+            "_enriched_graph_object": enriched_graph,
         }
 
-        # Calculate percentage of affected vessels
-        if results["summary"]["vessels_in_graph"] > 0:
-            results["summary"]["percentage_vessels_affected"] = (
-                results["summary"]["vessels_with_embolisms"]
-                / results["summary"]["vessels_in_graph"]
-                * 100
-            )
-
-        # Step 9: Save comprehensive results if requested
-        if save_results:
-            logger.info("Step 9: Saving comprehensive analysis results")
-            try:
-                # Save vessel-embolism analysis results
-                vessel_files = save_vessel_embolism_analysis(
-                    interaction_results=interaction_results,
-                    metrics_results=metrics_results,
-                    statistics=vessel_embolism_stats,
-                    output_dir=output_dir,
-                    patient_name=patient_name,
-                )
-                results["output_files"].update(vessel_files)
-
-                # Save enriched graph
-                enriched_graph_path = os.path.join(
-                    output_dir, f"{patient_name}_enriched_vessel_graph.json"
-                )
-                save_graph(enriched_graph, enriched_graph_path)
-                results["output_files"]["enriched_vessel_graph"] = enriched_graph_path
-                # Save comprehensive summary report
-                summary_report_path = os.path.join(
-                    output_dir, f"{patient_name}_analysis_report.txt"
-                )
-                save_analysis_report(results, summary_report_path)
-                results["output_files"]["report"] = summary_report_path
-
-                # Save level analysis if available
-                if level_analysis and "error" not in level_analysis:
-                    level_report_path = os.path.join(
-                        output_dir, f"{patient_name}_level_analysis.csv"
-                    )
-                    save_level_analysis_results(level_analysis, level_report_path)
-                    results["output_files"]["level_analysis"] = level_report_path
-
-            except Exception as e:
-                logger.error("Error saving comprehensive results: %s", e)
-                results["save_error"] = str(e)
-
-        # Final logging
-        logger.info("Comprehensive embolism analysis completed successfully")
-        logger.info("Summary: %d embolisms found", results["num_embolisms"])
-        logger.info(
-            "         %d vessel interactions detected",
-            results["summary"]["total_vessel_interactions"],
-        )
-        logger.info(
-            "         %d/%d vessels affected (%.1f%%)",
-            results["summary"]["vessels_with_embolisms"],
-            results["summary"]["vessels_in_graph"],
-            results["summary"]["percentage_vessels_affected"],
-        )
-
-        return results
-
     except Exception as e:
-        logger.error("Error in comprehensive embolism analysis: %s", e)
-        raise RuntimeError("Failed to complete comprehensive embolism analysis") from e
+        logger.error("Error in simple embolism analysis pipeline: %s", e)
+        raise RuntimeError("Failed to complete embolism analysis pipeline") from e
 
 
 def process_patient_complete_pipeline(
@@ -1083,6 +945,8 @@ def process_patient_complete_pipeline(
     stop_after: str | None = None,
     diameter_threshold: float = 0.5,
     length_threshold: float = 1.5,
+    compute_transversal_obstruction=False,
+    transversal_obstruction_kwargs=None,
 ) -> dict[str, Any]:
     """
     Complete end-to-end pipeline processing a patient from artery mask to final analysis.
@@ -1327,31 +1191,35 @@ def process_patient_complete_pipeline(
         if embolism_mask_path and "embolism" not in skip_steps:
             logger.info("STEP 6: Analyzing embolisms")
 
-            # Use the most processed labeled graph available
+            # Determine vessel data availability
             vessel_graph_path = None
+            vessel_mask_path = None
+            level_mask_path = None
 
-            # First try to find existing graphs (prefer labeled > cleaned > branch)
+            # Look for the most processed graph available (prefer labeled > oriented > cleaned > branch)
             for graph_name in [
                 "labeled_graph.json",
+                "oriented_graph.json",
                 "cleaned_graph.json",
                 "branch_graph.json",
             ]:
                 potential_path = os.path.join(output_dir, graph_name)
                 if os.path.exists(potential_path):
                     vessel_graph_path = potential_path
-                    logger.info(f"Found existing graph: {vessel_graph_path}")
+                    logger.info(f"Found vessel graph: {vessel_graph_path}")
                     break
 
-            # Look for existing vessel volume files directly in the output directory
-            vessel_mask_path = None
-            level_mask_path = None
-
-            # Search for existing volume files (prefer labeled > cleaned > branch)
+            # Look for vessel volume files (prefer labeled > oriented > cleaned > branch)
             volume_patterns = [
                 # Labeled volumes (most processed)
                 (
                     "labeled_graph_vessel_volume_edge_id.nii.gz",
                     "labeled_graph_vessel_volume_level.nii.gz",
+                ),
+                # Oriented volumes
+                (
+                    "oriented_graph_vessel_volume_edge_id.nii.gz",
+                    "oriented_graph_vessel_volume_level.nii.gz",
                 ),
                 # Cleaned volumes
                 (
@@ -1371,26 +1239,28 @@ def process_patient_complete_pipeline(
 
                 if os.path.exists(edge_path):
                     vessel_mask_path = edge_path
-                    logger.info(
-                        f"Found existing vessel volume (edge_id): {vessel_mask_path}"
-                    )
+                    logger.info(f"Found vessel volume (edge_id): {vessel_mask_path}")
 
                 if os.path.exists(level_path):
                     level_mask_path = level_path
-                    logger.info(
-                        f"Found existing vessel volume (level): {level_mask_path}"
-                    )
+                    logger.info(f"Found vessel volume (level): {level_mask_path}")
 
                 if vessel_mask_path:  # Use the first set found
                     break
 
-            if not vessel_graph_path:
-                logger.warning(
-                    "No vessel graph found for embolism analysis - running basic analysis only"
+            # Determine if vessel analysis should be performed
+            compute_vessel_analysis = (
+                vessel_graph_path is not None and vessel_mask_path is not None
+            )
+
+            if not compute_vessel_analysis:
+                logger.info(
+                    "Vessel data not available - performing basic embolism analysis only"
                 )
 
-            embolism_result = analyze_embolism_regions_with_graph_enrichment(
-                mask_path=embolism_mask_path,
+            # Run complete embolism analysis
+            embolism_result = analyze_embolisms_complete(
+                embolism_mask_path=embolism_mask_path,
                 patient_name=patient_name,
                 output_dir=output_dir,
                 vessel_graph_path=vessel_graph_path,
@@ -1399,7 +1269,11 @@ def process_patient_complete_pipeline(
                 separation_method=embolism_separation_method,
                 fusion_threshold=embolism_fusion_threshold,
                 include_colored_masks=True,
+                compute_vessel_analysis=compute_vessel_analysis,
+                compute_transversal_obstruction=compute_transversal_obstruction,
+                transversal_obstruction_kwargs=transversal_obstruction_kwargs,
             )
+
             pipeline_results["embolism_analysis"] = embolism_result
 
             if stop_after == "embolism":

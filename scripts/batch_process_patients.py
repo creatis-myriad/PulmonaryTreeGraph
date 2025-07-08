@@ -14,6 +14,10 @@ import time
 from typing import Any
 
 from pulmonarytreegraph.pipeline.core import process_patient_complete_pipeline
+from pulmonarytreegraph.utils.segment_heatmap_generator import (
+    create_segment_heatmap_from_batch,
+    create_segment_heatmaps_from_multiple_batches,
+)
 
 
 def setup_logging(output_dir: str = None, log_level: str = "INFO"):
@@ -309,6 +313,12 @@ def process_single_patient(
             stop_after=processing_options.get("stop_after"),
             diameter_threshold=processing_options.get("diameter_threshold", 0.5),
             length_threshold=processing_options.get("length_threshold", 1.5),
+            compute_transversal_obstruction=processing_options.get(
+                "compute_transversal_obstruction", False
+            ),
+            transversal_obstruction_kwargs=processing_options.get(
+                "transversal_obstruction_kwargs", {}
+            ),
         )
 
         processing_time = time.time() - start_time
@@ -426,6 +436,131 @@ def generate_batch_report(
                 f.write("  No issues detected\n")
 
     logger.info(f"Batch report saved to: {report_path}")
+
+
+def generate_segment_heatmaps(
+    output_dir: str, batch_name: str = None, logger: logging.Logger = None
+):
+    """
+    Generate segment heatmaps from the batch processing log file.
+
+    Args:
+        output_dir: Directory containing the batch processing logs
+        batch_name: Name for the batch (used in figure titles)
+        logger: Logger instance
+    """
+
+    if logger is None:
+        logger = logging.getLogger(__name__)
+
+    # Find the most recent log file
+    log_dir = os.path.join(output_dir, "logs")
+    if not os.path.exists(log_dir):
+        logger.warning("No logs directory found for heatmap generation")
+        return
+
+    log_files = glob.glob(os.path.join(log_dir, "batch_processing_*.log"))
+    if not log_files:
+        logger.warning("No batch processing log files found for heatmap generation")
+        return
+
+    # Get the most recent log file
+    latest_log = max(log_files, key=os.path.getmtime)
+    logger.info(f"Generating heatmaps from log file: {latest_log}")
+
+    # Create analysis directory
+    analysis_dir = os.path.join(output_dir, "analysis")
+    os.makedirs(analysis_dir, exist_ok=True)
+
+    try:
+        # Generate single batch heatmap
+        if batch_name is None:
+            batch_name = f"Batch_{os.path.basename(output_dir)}"
+
+        heatmap_path = os.path.join(analysis_dir, f"{batch_name}_segment_heatmap.png")
+
+        fig = create_segment_heatmap_from_batch(
+            batch_log_path=latest_log,
+            batch_name=batch_name,
+            save_path=heatmap_path,
+            figsize=(12, 8),
+        )
+
+        if fig:
+            logger.info(f"✓ Segment heatmap generated: {heatmap_path}")
+            # Close the figure to free memory
+            import matplotlib.pyplot as plt
+
+            plt.close(fig)
+        else:
+            logger.warning("Failed to generate segment heatmap - no segment data found")
+
+    except Exception as e:
+        logger.error(f"Error generating segment heatmaps: {e}")
+        logger.exception("Heatmap generation error traceback:")
+
+
+def generate_comparison_heatmaps(
+    batch_directories: list[str], output_dir: str = None, logger: logging.Logger = None
+):
+    """
+    Generate comparison heatmaps from multiple batch directories.
+
+    Args:
+        batch_directories: List of batch output directories
+        output_dir: Directory to save comparison heatmaps (defaults to current directory)
+        logger: Logger instance
+    """
+    if logger is None:
+        logger = logging.getLogger(__name__)
+
+    if output_dir is None:
+        output_dir = "."
+
+    # Find log files from each batch directory
+    batch_log_paths = {}
+
+    for batch_dir in batch_directories:
+        batch_name = os.path.basename(batch_dir)
+        log_dir = os.path.join(batch_dir, "logs")
+
+        if os.path.exists(log_dir):
+            log_files = glob.glob(os.path.join(log_dir, "batch_processing_*.log"))
+            if log_files:
+                latest_log = max(log_files, key=os.path.getmtime)
+                batch_log_paths[batch_name] = latest_log
+                logger.info(f"Found log for {batch_name}: {latest_log}")
+            else:
+                logger.warning(f"No log files found in {log_dir}")
+        else:
+            logger.warning(f"No logs directory found in {batch_dir}")
+
+    if len(batch_log_paths) < 2:
+        logger.warning("Need at least 2 batches for comparison heatmaps")
+        return
+
+    # Create analysis directory
+    analysis_dir = os.path.join(output_dir, "analysis")
+    os.makedirs(analysis_dir, exist_ok=True)
+
+    try:
+        # Generate comparison heatmaps
+        comparison_fig = create_segment_heatmaps_from_multiple_batches(
+            batch_log_paths=batch_log_paths, save_directory=analysis_dir
+        )
+
+        if comparison_fig:
+            logger.info(f"✓ Comparison heatmaps generated in: {analysis_dir}")
+            # Close the figure to free memory
+            import matplotlib.pyplot as plt
+
+            plt.close(comparison_fig)
+        else:
+            logger.warning("Failed to generate comparison heatmaps")
+
+    except Exception as e:
+        logger.error(f"Error generating comparison heatmaps: {e}")
+        logger.exception("Comparison heatmap generation error traceback:")
 
 
 def main():
@@ -555,6 +690,17 @@ Expected directory structure:
         choices=["preprocess", "build", "clean", "orient", "label", "embolism"],
         help="Stop processing after specified step",
     )
+    parser.add_argument(
+        "--compute-transversal-obstruction",
+        action="store_true",
+        help="Compute transversal obstruction metrics for each vessel segment",
+    )
+    parser.add_argument(
+        "--cpr-padding",
+        type=float,
+        default=1.0,
+        help="Padding for CPR in transversal obstruction (default: 1.0)",
+    )
 
     # Execution control
     parser.add_argument(
@@ -568,6 +714,23 @@ Expected directory structure:
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         default="INFO",
         help="Logging level (default: INFO)",
+    )
+
+    # Heatmap generation
+    parser.add_argument(
+        "--generate-heatmaps",
+        action="store_true",
+        default=True,
+        help="Generate segment heatmaps after processing (default: True)",
+    )
+    parser.add_argument(
+        "--batch-name",
+        help="Name for the batch (used in heatmap titles, defaults to output directory name)",
+    )
+    parser.add_argument(
+        "--comparison-batches",
+        nargs="+",
+        help="List of other batch directories for comparison heatmaps",
     )
 
     args = parser.parse_args()
@@ -701,6 +864,8 @@ Expected directory structure:
         "embolism_fusion_threshold": args.embolism_fusion_threshold,
         "skip_steps": args.skip_steps,
         "stop_after": args.stop_after,
+        "compute_transversal_obstruction": args.compute_transversal_obstruction,
+        "transversal_obstruction_kwargs": {"cpr_padding": args.cpr_padding},
     }
 
     # Process patients
@@ -801,6 +966,32 @@ Expected directory structure:
         )
 
     generate_batch_report(results, args.output_dir, logger)
+
+    # Generate segment heatmaps if requested
+    if args.generate_heatmaps and successful:
+        logger.info("\n" + "=" * 80)
+        logger.info("GENERATING SEGMENT HEATMAPS")
+        logger.info("=" * 80)
+
+        # Determine batch name
+        batch_name = args.batch_name
+        if batch_name is None:
+            batch_name = os.path.basename(os.path.abspath(args.output_dir))
+
+        # Generate single batch heatmap
+        generate_segment_heatmaps(args.output_dir, batch_name, logger)
+
+        # Generate comparison heatmaps if other batches are specified
+        if args.comparison_batches:
+            logger.info("Generating comparison heatmaps...")
+            all_batch_dirs = [args.output_dir] + args.comparison_batches
+
+            # Use parent directory for comparison output
+            comparison_output = os.path.dirname(os.path.abspath(args.output_dir))
+            generate_comparison_heatmaps(all_batch_dirs, comparison_output, logger)
+
+    elif args.generate_heatmaps and not successful:
+        logger.warning("Skipping heatmap generation - no successful patients processed")
 
     return len(failed) == 0
 

@@ -97,6 +97,17 @@ def main():
         action="store_true",
         help="Save vessel volumes at each processing step",
     )
+    parser.add_argument(
+        "--compute-transversal-obstruction",
+        action="store_true",
+        help="Compute transversal obstruction metrics for each vessel segment",
+    )
+    parser.add_argument(
+        "--cpr-padding",
+        type=float,
+        default=1.0,
+        help="Padding for CPR in transversal obstruction (default: 1.0)",
+    )
 
     # Processing control
     parser.add_argument(
@@ -148,6 +159,8 @@ def main():
             stop_after=args.stop_after,
             diameter_threshold=args.diameter_threshold,
             length_threshold=args.length_threshold,
+            compute_transversal_obstruction=args.compute_transversal_obstruction,
+            transversal_obstruction_kwargs={"cpr_padding": args.cpr_padding},
         )
 
         logger.info("=" * 60)
