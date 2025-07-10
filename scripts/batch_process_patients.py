@@ -44,7 +44,13 @@ def setup_logging(output_dir: str = None, log_level: str = "INFO"):
         )
 
 
-def find_patients(data_dir: str) -> list[dict[str, str]]:
+def find_patients(
+    data_dir: str = None,
+    arteries_dir: str = None,
+    embolies_dir: str = None,
+    images_dir: str = None,
+    lungs_dir: str = None,
+) -> list[dict[str, str]]:
     """
     Find all patient files in the specific directory structure.
 
@@ -68,24 +74,28 @@ def find_patients(data_dir: str) -> list[dict[str, str]]:
             └── ...
 
     Args:
-        data_dir: Base data directory containing the structured folders
+        data_dir: Base data directory containing the structured folders.
+        arteries_dir: Path to the arteries mask folder.
+        embolies_dir: Path to the embolies mask folder.
+        images_dir: Path to the images folder.
+        lungs_dir: Path to the lungs mask folder.
 
     Returns:
-        List of patient dictionaries with file paths
+        List of patient dictionaries with file paths.
     """
     patients = []
 
-    # Define the expected subdirectories
-    arteries_dir = os.path.join(data_dir, "arteries_mask")
-    embolies_dir = os.path.join(data_dir, "embolies_mask")
-    images_dir = os.path.join(data_dir, "images")
-    lungs_dir = os.path.join(data_dir, "lungs_mask")
+    # If data_dir is provided, construct folder paths
+    if data_dir:
+        arteries_dir = os.path.join(data_dir, "arteries_mask")
+        embolies_dir = os.path.join(data_dir, "embolies_mask")
+        images_dir = os.path.join(data_dir, "images")
+        lungs_dir = os.path.join(data_dir, "lungs_mask")
 
     # Check if required directories exist
-    if not os.path.exists(arteries_dir):
+    if not arteries_dir or not os.path.exists(arteries_dir):
         raise FileNotFoundError(f"Arteries mask directory not found: {arteries_dir}")
-
-    if not os.path.exists(lungs_dir):
+    if not lungs_dir or not os.path.exists(lungs_dir):
         raise FileNotFoundError(f"Lungs mask directory not found: {lungs_dir}")
 
     # Find all artery files
@@ -111,7 +121,6 @@ def find_patients(data_dir: str) -> list[dict[str, str]]:
         # Look for lung masks directory
         lung_masks_dir = os.path.join(lungs_dir, patient_id)
         if os.path.exists(lung_masks_dir) and os.path.isdir(lung_masks_dir):
-            # Check if it contains lung mask files
             lung_files = glob.glob(os.path.join(lung_masks_dir, "*.nii.gz"))
             if lung_files:
                 patient_info["lung_masks_dir"] = lung_masks_dir
@@ -125,14 +134,16 @@ def find_patients(data_dir: str) -> list[dict[str, str]]:
             )
 
         # Look for embolism mask
-        embolism_file = os.path.join(embolies_dir, f"{patient_id}_embolism.nii.gz")
-        if os.path.exists(embolism_file):
-            patient_info["embolism_mask"] = embolism_file
+        if embolies_dir:
+            embolism_file = os.path.join(embolies_dir, f"{patient_id}_embolism.nii.gz")
+            if os.path.exists(embolism_file):
+                patient_info["embolism_mask"] = embolism_file
 
         # Look for original image
-        image_file = os.path.join(images_dir, f"{patient_id}.nii.gz")
-        if os.path.exists(image_file):
-            patient_info["image"] = image_file
+        if images_dir:
+            image_file = os.path.join(images_dir, f"{patient_id}.nii.gz")
+            if os.path.exists(image_file):
+                patient_info["image"] = image_file
 
         patients.append(patient_info)
 
@@ -597,8 +608,23 @@ Expected directory structure:
     # Input/Output
     parser.add_argument(
         "--data-dir",
-        required=True,
         help="Base data directory containing arteries_mask/, lungs_mask/, etc.",
+    )
+    parser.add_argument(
+        "--arteries-dir",
+        help="Path to the arteries mask folder.",
+    )
+    parser.add_argument(
+        "--embolies-dir",
+        help="Path to the embolies mask folder.",
+    )
+    parser.add_argument(
+        "--images-dir",
+        help="Path to the images folder.",
+    )
+    parser.add_argument(
+        "--lungs-dir",
+        help="Path to the lungs mask folder.",
     )
     parser.add_argument(
         "--output-dir",
@@ -748,9 +774,14 @@ Expected directory structure:
 
     try:
         # Find all patients
-        all_patients = find_patients(args.data_dir)
-        logger.info("Found %d patients in data directory", len(all_patients))
-
+        all_patients = find_patients(
+            data_dir=args.data_dir,
+            arteries_dir=args.arteries_dir,
+            embolies_dir=args.embolies_dir,
+            images_dir=args.images_dir,
+            lungs_dir=args.lungs_dir,
+        )
+        logger.info("Found %d patients", len(all_patients))
     except FileNotFoundError as e:
         logger.error("Directory structure error: %s", e)
         return False
