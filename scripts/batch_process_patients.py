@@ -9,6 +9,7 @@ import argparse
 import glob
 import logging
 import os
+import shutil
 import sys
 import time
 from typing import Any
@@ -57,11 +58,11 @@ def find_patients(
     Expected structure:
     data_dir/
     ├── arteries_mask/
-    │   ├── 0028_arteries.nii.gz
-    │   └── XXXX_arteries.nii.gz
+    │   ├── 0028.nii.gz
+    │   └── XXXX.nii.gz
     ├── embolies_mask/
-    │   ├── 0028_embolism.nii.gz
-    │   └── XXXX_embolism.nii.gz
+    │   ├── 0028.nii.gz
+    │   └── XXXX.nii.gz
     ├── images/
     │   ├── 0028.nii.gz
     │   └── XXXX.nii.gz
@@ -99,7 +100,7 @@ def find_patients(
         raise FileNotFoundError(f"Lungs mask directory not found: {lungs_dir}")
 
     # Find all artery files
-    artery_pattern = os.path.join(arteries_dir, "*_arteries.nii.gz")
+    artery_pattern = os.path.join(arteries_dir, "*.nii.gz")
     artery_files = glob.glob(artery_pattern)
 
     if not artery_files:
@@ -108,7 +109,7 @@ def find_patients(
     for artery_file in artery_files:
         # Extract patient ID from filename
         filename = os.path.basename(artery_file)
-        patient_id = filename.replace("_arteries.nii.gz", "")
+        patient_id = filename.replace(".nii.gz", "")
 
         patient_info = {
             "id": patient_id,
@@ -135,7 +136,7 @@ def find_patients(
 
         # Look for embolism mask
         if embolies_dir:
-            embolism_file = os.path.join(embolies_dir, f"{patient_id}_embolism.nii.gz")
+            embolism_file = os.path.join(embolies_dir, f"{patient_id}.nii.gz")
             if os.path.exists(embolism_file):
                 patient_info["embolism_mask"] = embolism_file
 
@@ -332,6 +333,17 @@ def process_single_patient(
             ),
         )
 
+        # Copy enriched graphs to central directory if requested
+        if processing_options.get("save_enriched_graphs") and processing_options.get(
+            "enriched_graphs_dir"
+        ):
+            copy_enriched_graphs(
+                patient_output_dir,
+                processing_options["enriched_graphs_dir"],
+                patient_id,
+                logger,
+            )
+
         processing_time = time.time() - start_time
         logger.info(
             f"Patient {patient_id} completed successfully in {processing_time:.1f} seconds"
@@ -376,6 +388,53 @@ def process_single_patient(
             "error": f"Runtime error: {str(e)}",
             "validation": validation,
         }
+
+
+def copy_enriched_graphs(
+    patient_output_dir: str,
+    enriched_graphs_dir: str,
+    patient_id: str,
+    logger: logging.Logger,
+):
+    """
+    Copy enriched graph files from patient output directory to central enriched_graphs directory.
+
+    Args:
+        patient_output_dir: Patient's individual output directory
+        enriched_graphs_dir: Central directory for all enriched graphs
+        patient_id: Patient identifier
+        logger: Logger instance
+    """
+
+    # Based on the core.py logic, enriched graphs are saved with these patterns:
+    enriched_graph_files = [
+        "enriched_graph.json",
+        "enriched_graph_real_coords.json",
+    ]
+
+    copied_files = []
+
+    for filename in enriched_graph_files:
+        source_path = os.path.join(patient_output_dir, filename)
+
+        if os.path.exists(source_path):
+            # Add patient ID prefix to avoid naming conflicts
+            new_filename = f"{patient_id}_{filename}"
+            dest_path = os.path.join(enriched_graphs_dir, new_filename)
+
+            try:
+                shutil.copy2(source_path, dest_path)
+                copied_files.append(new_filename)
+                logger.debug(f"Copied enriched graph: {filename} -> {new_filename}")
+            except Exception as e:
+                logger.warning(f"Failed to copy enriched graph {filename}: {e}")
+
+    if copied_files:
+        logger.info(
+            f"Copied {len(copied_files)} enriched graph files for patient {patient_id}"
+        )
+    else:
+        logger.warning(f"No enriched graph files found for patient {patient_id}")
 
 
 def generate_batch_report(
@@ -702,6 +761,11 @@ Expected directory structure:
         default=5.0,
         help="Distance threshold for fusing nearby embolism components",
     )
+    parser.add_argument(
+        "--save-enriched-graphs",
+        action="store_true",
+        help="Save all enriched graphs into a specific folder in the output directory.",
+    )
 
     # Processing control
     parser.add_argument(
@@ -882,6 +946,12 @@ Expected directory structure:
 
         return len(valid_patients) == len(validation_results)
 
+    # Create enriched graphs directory if requested
+    if args.save_enriched_graphs:
+        enriched_graphs_dir = os.path.join(args.output_dir, "enriched_graphs")
+        os.makedirs(enriched_graphs_dir, exist_ok=True)
+        logger.info("Enriched graphs will be saved to: %s", enriched_graphs_dir)
+
     # Prepare processing options
     processing_options = {
         "radius_ratio_threshold": args.radius_ratio_threshold,
@@ -897,6 +967,9 @@ Expected directory structure:
         "stop_after": args.stop_after,
         "compute_transversal_obstruction": args.compute_transversal_obstruction,
         "transversal_obstruction_kwargs": {"cpr_padding": args.cpr_padding},
+        "enriched_graphs_dir": enriched_graphs_dir
+        if args.save_enriched_graphs
+        else None,
     }
 
     # Process patients
