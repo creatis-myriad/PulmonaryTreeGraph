@@ -58,7 +58,7 @@ def extract_segment_summary_from_log(log_file_path: str) -> dict[str, dict[str, 
             # Extract segment information
             segments = {}
             segment_matches = re.findall(
-                r"([A-Z]{3}): (\d+) segment chains", segment_data
+                r"([A-Z]{3}|unknown): (\d+) segment chains", segment_data
             )
 
             for segment, chain_count in segment_matches:
@@ -111,7 +111,7 @@ def create_segment_heatmap_from_batch(
         all_segments.update(patient_data["segments"].keys())
 
     # Order segments in anatomical order: RUL, RML, RLL, LUL, LLL
-    segment_order = ["RUL", "RML", "RLL", "LUL", "LLL"]
+    segment_order = ["RUL", "RML", "RLL", "LUL", "LLL", "unknown"]
     found_segments = [seg for seg in segment_order if seg in all_segments]
     # Add any unexpected segments at the end
     found_segments.extend(
