@@ -34,25 +34,118 @@ def detect_radius_pattern(
     radius_list: list[float], threshold_factor: float = 0.5
 ) -> bool:
     """Detect if a vessel segment shows a significant decrease then increase in radius."""
-    if not radius_list or len(radius_list) < 3:
-        return False
-
     try:
-        min_value = min(radius_list)
-        min_idx = np.argmin(radius_list)
-    except (ValueError, TypeError) as e:
-        logger.warning("Error analyzing radius list: %s", e)
+        # Debug: Print the input type and structure
+        logger.debug("Input radius_list type: %s", type(radius_list))
+        logger.debug("Input radius_list: %s", radius_list)
+
+        # Fix: Check for empty array properly
+        if radius_list is None:
+            return False
+
+        # Handle numpy arrays specifically
+        if isinstance(radius_list, np.ndarray):
+            if radius_list.size == 0:
+                return False
+            radius_array = radius_list.copy()
+        # Handle lists and tuples
+        elif isinstance(radius_list, list | tuple):
+            if len(radius_list) == 0:
+                return False
+            if len(radius_list) < 3:
+                return False
+            # Check if it's a nested structure
+            if len(radius_list) > 0 and isinstance(
+                radius_list[0], list | tuple | np.ndarray
+            ):
+                # Flatten nested structure
+                flattened = []
+                for item in radius_list:
+                    if isinstance(item, list | tuple):
+                        flattened.extend(item)
+                    elif isinstance(item, np.ndarray):
+                        flattened.extend(item.flatten())
+                    else:
+                        flattened.append(item)
+                radius_array = np.asarray(flattened)
+            else:
+                radius_array = np.asarray(radius_list)
+        else:
+            try:
+                radius_array = np.asarray(radius_list)
+                if radius_array.size == 0:
+                    return False
+            except (ValueError, TypeError):
+                logger.debug("Could not convert radius_list to numpy array")
+                return False
+
+        # Ensure it's 1D and has enough elements
+        if radius_array.ndim != 1:
+            radius_array = radius_array.flatten()
+
+        if radius_array.size < 3:
+            logger.debug("Radius array too small: %d elements", radius_array.size)
+            return False
+
+        # Check if we have valid numeric data
+        if not np.issubdtype(radius_array.dtype, np.number):
+            logger.debug("Radius array is not numeric: %s", radius_array.dtype)
+            return False
+
+        # Check for NaN or infinite values
+        if not np.isfinite(radius_array).all():
+            logger.debug("Radius array contains NaN or infinite values")
+            return False
+
+        # Calculate min and its index
+        min_value = np.min(radius_array)
+        min_idx = np.argmin(radius_array)
+
+        # Ensure min_idx is a scalar integer
+        if hasattr(min_idx, "item"):
+            min_idx = min_idx.item()
+        min_idx = int(min_idx)
+
+        # Check if minimum is at the endpoints (normal case)
+        if min_idx == 0 or min_idx == len(radius_array) - 1:
+            return False
+
+        # Calculate ratios
+        max_before = np.max(radius_array[:min_idx])
+        max_after = np.max(radius_array[min_idx:])
+
+        # Ensure these are scalars
+        if hasattr(max_before, "item"):
+            max_before = max_before.item()
+        if hasattr(max_after, "item"):
+            max_after = max_after.item()
+        if hasattr(min_value, "item"):
+            min_value = min_value.item()
+
+        # Avoid division by zero
+        if max_before <= 0 or min_value <= 0:
+            return False
+
+        decrease_ratio = (max_before - min_value) / max_before
+        increase_ratio = (max_after - min_value) / min_value
+
+        result = decrease_ratio > threshold_factor and increase_ratio > threshold_factor
+        logger.debug(
+            "Pattern detection result: %s (decrease: %.3f, increase: %.3f)",
+            result,
+            decrease_ratio,
+            increase_ratio,
+        )
+
+        return result
+
+    except Exception as e:
+        logger.error("Error in detect_radius_pattern: %s", e)
+        logger.error("Input was: %s (type: %s)", radius_list, type(radius_list))
+        import traceback
+
+        logger.error("Full traceback: %s", traceback.format_exc())
         return False
-
-    if min_idx == 0 or min_idx == len(radius_list) - 1:
-        return False  # Min at endpoints is normal
-
-    max_before = max(radius_list[:min_idx])
-    max_after = max(radius_list[min_idx:])
-    decrease_ratio = (max_before - min_value) / max_before if max_before > 0 else 0
-    increase_ratio = (max_after - min_value) / min_value if min_value > 0 else 0
-
-    return decrease_ratio > threshold_factor and increase_ratio > threshold_factor
 
 
 def get_edge_data(graph: nx.Graph, node1: int, node2: int) -> dict | None:
@@ -103,11 +196,24 @@ def _combine_edge_segments(
     edge1_radius = np.asarray(edge1_radius)
     edge2_radius = np.asarray(edge2_radius)
 
-    if edge1_centerline.size > 0 and edge2_centerline.size > 0:
+    # Check if both centerlines have data using size comparison (not direct array comparison)
+    edge1_has_data = edge1_centerline.size > 0
+    edge2_has_data = edge2_centerline.size > 0
+
+    if edge1_has_data and edge2_has_data:
         # Remove duplicate middle point and concatenate
-        combined_centerline = np.concatenate([edge1_centerline[:-1], edge2_centerline])
-        combined_radius = np.concatenate([edge1_radius, edge2_radius])
-        return combined_centerline.tolist(), combined_radius.tolist()
+        try:
+            combined_centerline = np.concatenate(
+                [edge1_centerline[:-1], edge2_centerline]
+            )
+            combined_radius = np.concatenate([edge1_radius, edge2_radius])
+            return combined_centerline.tolist(), combined_radius.tolist()
+        except (ValueError, IndexError) as e:
+            logger.warning("Error combining centerlines: %s", e)
+            # Fallback: just concatenate radius arrays
+            radius1 = edge1_radius.tolist() if edge1_radius.size > 0 else []
+            radius2 = edge2_radius.tolist() if edge2_radius.size > 0 else []
+            return [], radius1 + radius2
     else:
         # Handle case with no centerline data
         radius1 = edge1_radius.tolist() if edge1_radius.size > 0 else []
@@ -179,9 +285,11 @@ def _fuse_two_segments(
         neighbor2_pos = np.array(neighbor2_pos)
 
         # Orient edge1: should go neighbor1 -> middle
-        if np.array_equal(edge1_centerline[0], neighbor1_pos) and np.array_equal(
-            edge1_centerline[-1], middle_pos
-        ):
+        # Check each condition separately to avoid ambiguous truth values
+        start_matches = np.array_equal(edge1_centerline[0], neighbor1_pos)
+        end_matches = np.array_equal(edge1_centerline[-1], middle_pos)
+
+        if start_matches and end_matches:
             oriented_edge1_centerline = edge1_centerline
             oriented_edge1_radius = edge1_radius
         else:
@@ -190,9 +298,11 @@ def _fuse_two_segments(
             oriented_edge1_radius = edge1_radius[::-1]
 
         # Orient edge2: should go middle -> neighbor2
-        if np.array_equal(edge2_centerline[0], middle_pos) and np.array_equal(
-            edge2_centerline[-1], neighbor2_pos
-        ):
+        # Check each condition separately to avoid ambiguous truth values
+        start_matches = np.array_equal(edge2_centerline[0], middle_pos)
+        end_matches = np.array_equal(edge2_centerline[-1], neighbor2_pos)
+
+        if start_matches and end_matches:
             oriented_edge2_centerline = edge2_centerline
             oriented_edge2_radius = edge2_radius
         else:
@@ -282,8 +392,15 @@ def _should_remove_branch(
 ) -> bool:
     """Determine if a terminal branch should be removed based on criteria."""
     length = edge_data.get("length", 0)
-    parent_diameter = 2 * parent_radius
-    radius_ratio = end_radius / parent_radius if parent_radius > 0 else 0
+
+    # Ensure parent_radius is a scalar
+    if hasattr(parent_radius, "item"):
+        parent_radius = parent_radius.item()
+    if hasattr(end_radius, "item"):
+        end_radius = end_radius.item()
+
+    parent_diameter = 2 * float(parent_radius)
+    radius_ratio = float(end_radius) / float(parent_radius) if parent_radius > 0 else 0
 
     # Case 1: Very short branch (much shorter than parent diameter)
     if length < parent_diameter:
@@ -323,8 +440,16 @@ def _find_branches_to_remove(
     for node in terminal_nodes:
         parent = next(graph.neighbors(node))
         edge_data = graph.edges[node, parent]
+
+        # Safely extract radius values
         parent_radius = graph.nodes[parent]["radius"]
         end_radius = graph.nodes[node]["radius"]
+
+        # Ensure radius values are scalars
+        if hasattr(parent_radius, "item"):
+            parent_radius = parent_radius.item()
+        if hasattr(end_radius, "item"):
+            end_radius = end_radius.item()
 
         if _should_remove_branch(
             node,
@@ -376,13 +501,43 @@ def _remove_suspicious_cycle_edges(graph: nx.Graph) -> int:
     """Remove suspicious edges in cycles and return count."""
     removed_edges = []
 
-    for cycle in get_cycle_edges(graph):
-        for edge in cycle:
-            edge_data = get_edge_data(graph, *edge)
-            if edge_data and detect_radius_pattern(edge_data.get("radius", [])):
-                if graph.has_edge(*edge):
-                    removed_edges.append((edge, edge_data.get("id", "unknown")))
-                    graph.remove_edge(*edge)
+    try:
+        logger.debug("Getting cycle edges")
+        cycles = get_cycle_edges(graph)
+        logger.debug("Found %d cycles", len(cycles))
+
+        for i, cycle in enumerate(cycles):
+            logger.debug("Processing cycle %d with %d edges", i, len(cycle))
+
+            for j, edge in enumerate(cycle):
+                logger.debug("Processing edge %d: %s", j, edge)
+
+                try:
+                    edge_data = get_edge_data(graph, *edge)
+                    if edge_data:
+                        radius_data = edge_data.get("radius", [])
+                        logger.debug(
+                            "Radius data type: %s, length: %d",
+                            type(radius_data),
+                            len(radius_data) if hasattr(radius_data, "__len__") else 0,
+                        )
+
+                        if detect_radius_pattern(radius_data):
+                            if graph.has_edge(*edge):
+                                removed_edges.append(
+                                    (edge, edge_data.get("id", "unknown"))
+                                )
+                                graph.remove_edge(*edge)
+                                logger.debug("Removed suspicious edge: %s", edge)
+                except Exception as e:
+                    logger.error("Error processing edge %s in cycle %d: %s", edge, i, e)
+                    continue
+
+    except Exception as e:
+        logger.error("Error in _remove_suspicious_cycle_edges: %s", e)
+        import traceback
+
+        logger.error("Full traceback: %s", traceback.format_exc())
 
     if removed_edges:
         edge_ids = [str(edge_id) for _, edge_id in removed_edges]
@@ -399,25 +554,39 @@ def _remove_artefact_branches(
     graph: nx.Graph, radius_ratio_threshold: float, length_ratio_threshold: float
 ) -> int:
     """Remove terminal branches based on criteria and return count."""
-    to_remove = _find_branches_to_remove(
-        graph, radius_ratio_threshold, length_ratio_threshold
-    )
-
-    # Remove the marked branches
-    removed_ids = []
-    for node, parent, edge_id in to_remove:
-        if graph.has_edge(node, parent):
-            removed_ids.append(str(edge_id))
-            graph.remove_edge(node, parent)
-
-    if to_remove:
-        logger.info(
-            "Removed %d short/thin terminal branches with IDs: %s",
-            len(to_remove),
-            removed_ids,
+    try:
+        logger.debug("Finding branches to remove")
+        to_remove = _find_branches_to_remove(
+            graph, radius_ratio_threshold, length_ratio_threshold
         )
+        logger.debug("Found %d branches to remove", len(to_remove))
 
-    return len(to_remove)
+        # Remove the marked branches
+        removed_ids = []
+        for node, parent, edge_id in to_remove:
+            try:
+                if graph.has_edge(node, parent):
+                    removed_ids.append(str(edge_id))
+                    graph.remove_edge(node, parent)
+            except Exception as e:
+                logger.error("Error removing branch edge %s-%s: %s", node, parent, e)
+                continue
+
+        if to_remove:
+            logger.info(
+                "Removed %d short/thin terminal branches with IDs: %s",
+                len(to_remove),
+                removed_ids,
+            )
+
+        return len(to_remove)
+
+    except Exception as e:
+        logger.error("Error in _remove_artefact_branches: %s", e)
+        import traceback
+
+        logger.error("Full traceback: %s", traceback.format_exc())
+        return 0
 
 
 def _validate_graph_structure(graph: nx.Graph) -> bool:
@@ -506,10 +675,21 @@ def clean_graph(
 
     try:
         # Apply cleaning pipeline with progress tracking
+        logger.info("Starting graph cleaning pipeline")
+
+        logger.info("Step 1: Removing suspicious cycle edges")
         _remove_suspicious_cycle_edges(graph)
+
+        logger.info("Step 2: Removing artefact branches")
         _remove_artefact_branches(graph, radius_ratio_threshold, length_ratio_threshold)
+
+        logger.info("Step 3: Fusing linear segments")
         graph = fuse_linear_segments(graph)
+
+        logger.info("Step 4: Removing single neighbor nodes")
         graph = remove_single_neighbor_nodes(graph)
+
+        logger.info("Step 5: Removing isolated nodes")
         remove_isolated_nodes(graph)
 
         final_stats = get_graph_stats(graph)
@@ -523,8 +703,11 @@ def clean_graph(
                 edges_removed,
             )
 
-    except (nx.NetworkXError, AttributeError, TypeError, ValueError, KeyError) as e:
+    except Exception as e:
         logger.error("Error during graph cleaning: %s", e)
+        import traceback
+
+        logger.error("Full traceback: %s", traceback.format_exc())
         return graph
 
     return graph
