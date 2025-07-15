@@ -80,15 +80,204 @@ def prepare_edge_attrs(
     centerline = edge_attrs.get("centerline", [])
     if len(centerline) > 0:
         try:
-            if not np.array_equal(
-                edge_attrs["centerline"][0], graph.nodes[source]["pos"]
+            # Convert to numpy arrays for consistent comparison
+            centerline_first = np.array(edge_attrs["centerline"][0])
+            centerline_last = np.array(edge_attrs["centerline"][-1])
+            source_pos = np.array(graph.nodes[source]["pos"])
+            target_pos = np.array(graph.nodes[target]["pos"])
+
+            # Check if centerline is correctly oriented (source -> target)
+            first_matches_source = np.array_equal(centerline_first, source_pos)
+            last_matches_target = np.array_equal(centerline_last, target_pos)
+
+            # If both match, centerline is correctly oriented
+            if first_matches_source and last_matches_target:
+                logger.debug(f"Centerline already correct for edge {source}->{target}")
+
+            # If both are reversed, fix the orientation
+            elif np.array_equal(centerline_first, target_pos) and np.array_equal(
+                centerline_last, source_pos
             ):
+                logger.debug(f"Reversing centerline for edge {source}->{target}")
                 edge_attrs["centerline"] = list(reversed(edge_attrs["centerline"]))
-                edge_attrs["radius"] = list(reversed(edge_attrs["radius"]))
-        except (ValueError, TypeError) as e:
+                if "radius" in edge_attrs:
+                    edge_attrs["radius"] = list(reversed(edge_attrs["radius"]))
+
+        except (ValueError, TypeError, KeyError) as e:
             logger.warning("Failed to check centerline orientation: %s", e)
 
     return edge_attrs
+
+
+def validate_centerline_orientations(graph: nx.DiGraph) -> list[str]:
+    """
+    Validate that centerlines flow from source to target in directed edges.
+    """
+    issues = []
+
+    for source, target, data in graph.edges(data=True):
+        centerline = data.get("centerline", [])
+        if len(centerline) == 0:
+            continue
+
+        try:
+            centerline_array = np.asarray(centerline)
+            source_pos = np.array(graph.nodes[source]["pos"])
+            target_pos = np.array(graph.nodes[target]["pos"])
+
+            first_point = np.array(centerline_array[0])
+            last_point = np.array(centerline_array[-1])
+
+            # Check if centerline flows from source to target
+            first_matches_source = np.allclose(first_point, source_pos, atol=1e-6)
+            last_matches_target = np.allclose(last_point, target_pos, atol=1e-6)
+
+            if not (first_matches_source and last_matches_target):
+                issues.append(
+                    f"Edge {source}->{target}: centerline doesn't flow from source to target"
+                )
+
+        except Exception as e:
+            issues.append(
+                f"Edge {source}->{target}: failed to validate centerline - {e}"
+            )
+
+    return issues
+
+
+def validate_parent_child_centerline_connectivity(graph: nx.DiGraph) -> list[str]:
+    """
+    Validate that parent's last centerline point equals child's first centerline point.
+    """
+    issues = []
+
+    for node in graph.nodes():
+        # Get all outgoing edges (children) from this node
+        for child in graph.successors(node):
+            try:
+                # Get the edge data from parent to child
+                edge_data = graph.edges[node, child]
+                centerline = edge_data.get("centerline", [])
+
+                if len(centerline) == 0:
+                    continue
+
+                # The first point of this edge should match the node's position
+                child_first_point = np.array(centerline[0])
+                node_pos = np.array(graph.nodes[node]["pos"])
+
+                if not np.array_equal(child_first_point, node_pos):
+                    issues.append(
+                        f"Child edge {node}->{child}: first centerline point {child_first_point} != parent node pos {node_pos}"
+                    )
+
+                # The last point of this edge should match the child node's position
+                child_last_point = np.array(centerline[-1])
+                child_node_pos = np.array(graph.nodes[child]["pos"])
+
+                if not np.array_equal(child_last_point, child_node_pos):
+                    issues.append(
+                        f"Child edge {node}->{child}: last centerline point {child_last_point} != child node pos {child_node_pos}"
+                    )
+
+            except Exception as e:
+                issues.append(
+                    f"Failed to validate connectivity for edge {node}->{child}: {e}"
+                )
+
+    return issues
+
+
+def validate_tree_orientation(
+    graph: nx.DiGraph, root_id: int
+) -> tuple[bool, list[str]]:
+    """
+    Validate that the directed tree is correctly oriented from root to leaves.
+
+    Returns:
+        tuple: (is_valid, list_of_issues)
+    """
+    issues = []
+
+    # Check if it's a tree (connected and n-1 edges)
+    if not nx.is_weakly_connected(graph):
+        issues.append("Graph is not connected")
+
+    if graph.number_of_edges() != graph.number_of_nodes() - 1:
+        issues.append(
+            f"Not a tree: {graph.number_of_edges()} edges for {graph.number_of_nodes()} nodes"
+        )
+
+    # Check root has no incoming edges
+    if graph.in_degree(root_id) != 0:
+        issues.append(f"Root node {root_id} has incoming edges")
+
+    # Check all non-root nodes have exactly one incoming edge
+    for node in graph.nodes():
+        if node != root_id and graph.in_degree(node) != 1:
+            issues.append(
+                f"Non-root node {node} has {graph.in_degree(node)} incoming edges (should be 1)"
+            )
+
+    # Check leaves have no outgoing edges
+    leaves = [node for node in graph.nodes() if graph.out_degree(node) == 0]
+    if len(leaves) == 0:
+        issues.append("No leaf nodes found")
+
+    # Validate centerline orientations flow from parent to child
+    centerline_issues = validate_centerline_orientations(graph)
+    issues.extend(centerline_issues)
+
+    # Validate parent-child centerline connectivity
+    connectivity_issues = validate_parent_child_centerline_connectivity(graph)
+    issues.extend(connectivity_issues)
+
+    return len(issues) == 0, issues
+
+
+def ensure_proper_tree_orientation(graph: nx.Graph, root: int) -> nx.DiGraph:
+    """
+    Create a properly oriented tree using BFS to ensure parent->child direction.
+    """
+    node_mapping: dict[int, int] = {}
+    node_counter = {"count": 0}
+    edge_counter = {"count": 1}
+
+    new_graph = nx.DiGraph()
+
+    # IMPORTANT: Ensure root gets ID 0
+    root_id = get_or_create_node_id(root, node_mapping, node_counter)
+    add_node(new_graph, root_id, root, graph)
+
+    # BFS to ensure proper parent-child relationships
+    queue = [root]
+    visited = set([root])
+    parent_map = {root: None}
+
+    # Build parent-child relationships
+    while queue:
+        current = queue.pop(0)
+        for neighbor in graph.neighbors(current):
+            if neighbor not in visited:
+                visited.add(neighbor)
+                parent_map[neighbor] = current
+                queue.append(neighbor)
+
+    # Create directed graph with proper orientation (skip root since already added)
+    for node in visited:
+        if node != root:  # Skip root, already added
+            new_node_id = get_or_create_node_id(node, node_mapping, node_counter)
+            add_node(new_graph, new_node_id, node, graph)
+
+    # Add edges from parent to child
+    for child, parent in parent_map.items():
+        if parent is not None:  # Skip root
+            parent_id = node_mapping[parent]
+            child_id = node_mapping[child]
+            edge_attrs = prepare_edge_attrs(graph, parent, child, edge_counter)
+            new_graph.add_edge(parent_id, child_id, **edge_attrs)
+
+    return new_graph
 
 
 def orient_graph(graph: nx.Graph) -> nx.DiGraph:
@@ -123,56 +312,51 @@ def orient_graph(graph: nx.Graph) -> nx.DiGraph:
         logger.error("Failed to find starting branch for orientation: %s", e)
         return nx.DiGraph()
 
-    # Get positions
-    start_position = np.array(graph.nodes[start_node]["pos"])
-    end_position = np.array(graph.nodes[end_node]["pos"])
-
-    logger.info("Starting orientation from edge %s", edge_name)
-    logger.info(
-        "Start node: %d at %s, End node: %d at %s, Mean radius: %.3f",
-        start_node,
-        start_position,
-        end_node,
-        end_position,
-        mean_radius,
-    )
-
     # Choose the endpoint node (degree 1) as the root for orientation
     if graph.degree(start_node) == 1:
         root = start_node
     else:
         root = end_node
 
-    node_mapping: dict[int, int] = {}
-    node_counter = {"count": 0}
-    edge_counter = {"count": 1}  # Start edge IDs from 1
+    logger.info("Starting orientation from edge %s with root node %d", edge_name, root)
 
-    new_graph = nx.DiGraph()
-    stack = [root]
-    visited = set()
+    # Use improved orientation method
+    new_graph = ensure_proper_tree_orientation(graph, root)
 
-    while stack:
-        node = stack.pop()
-        if node in visited:
-            continue
-        visited.add(node)
-        new_node_id = get_or_create_node_id(node, node_mapping, node_counter)
-        add_node(new_graph, new_node_id, node, graph)
-        for neighbor in graph.neighbors(node):
-            if neighbor not in visited:
-                new_neighbor_id = get_or_create_node_id(
-                    neighbor, node_mapping, node_counter
-                )
-                add_node(new_graph, new_neighbor_id, neighbor, graph)
-                edge_attrs = prepare_edge_attrs(graph, node, neighbor, edge_counter)
-                new_graph.add_edge(new_node_id, new_neighbor_id, **edge_attrs)
-                stack.append(neighbor)
+    # Validate the orientation - root should always be ID 0
+    root_id = 0  # Root always gets ID 0 in our mapping
+    logger.info(f"Validating tree with root_id={root_id} (original root was {root})")
 
-    edges_processed = edge_counter["count"] - 1
+    is_valid, issues = validate_tree_orientation(new_graph, root_id)
+
+    if not is_valid:
+        logger.error("Tree orientation validation failed:")
+        for issue in issues:
+            logger.error("  - %s", issue)
+
+        # Debug information
+        logger.error("Debug info:")
+        logger.error(
+            f"  - Graph has {new_graph.number_of_nodes()} nodes, {new_graph.number_of_edges()} edges"
+        )
+        logger.error(
+            f"  - Root node {root_id} in_degree: {new_graph.in_degree(root_id)}"
+        )
+        logger.error(
+            f"  - Root node {root_id} out_degree: {new_graph.out_degree(root_id)}"
+        )
+
+        # Show nodes with 0 incoming edges
+        zero_in_degree = [n for n in new_graph.nodes() if new_graph.in_degree(n) == 0]
+        logger.error(f"  - Nodes with 0 incoming edges: {zero_in_degree}")
+
+    else:
+        logger.info("Tree orientation validation passed")
+
+    edges_processed = new_graph.number_of_edges()
     logger.info(
-        "Graph orientation complete: %d nodes, %d edges (reassigned IDs 1-%d)",
+        "Graph orientation complete: %d nodes, %d edges",
         new_graph.number_of_nodes(),
-        new_graph.number_of_edges(),
         edges_processed,
     )
     return new_graph
