@@ -550,18 +550,141 @@ def _remove_suspicious_cycle_edges(graph: nx.Graph) -> int:
     return len(removed_edges)
 
 
+def _count_large_terminal_vessels(graph: nx.Graph, min_diameter: float = 10.0) -> int:
+    """Count terminal vessels (degree 1) with large mean diameter."""
+    count = 0
+    terminal_nodes = [node for node in graph.nodes if graph.degree(node) == 1]
+
+    for node in terminal_nodes:
+        if graph.neighbors(node):  # Ensure it has a neighbor
+            neighbor = next(graph.neighbors(node))
+            edge_data = graph.edges[node, neighbor]
+            mean_radius = edge_data.get("mean_radius", 0)
+            mean_diameter = 2 * mean_radius
+
+            if mean_diameter >= min_diameter:
+                count += 1
+                logger.debug(
+                    f"Large terminal vessel found: node {node}, diameter={mean_diameter:.2f}"
+                )
+
+    return count
+
+
+def _get_large_terminal_vessels(
+    graph: nx.Graph, min_diameter: float = 10.0
+) -> list[tuple[int, float]]:
+    """Get terminal vessels (degree 1) with large mean diameter and their diameters."""
+    large_terminals = []
+    terminal_nodes = [node for node in graph.nodes if graph.degree(node) == 1]
+
+    for node in terminal_nodes:
+        if graph.neighbors(node):  # Ensure it has a neighbor
+            neighbor = next(graph.neighbors(node))
+            edge_data = graph.edges[node, neighbor]
+            mean_radius = edge_data.get("mean_radius", 0)
+            mean_diameter = 2 * mean_radius
+
+            if mean_diameter >= min_diameter:
+                large_terminals.append((node, mean_diameter))
+
+    return large_terminals
+
+
+def _filter_removal_to_protect_largest(
+    to_remove: list[tuple[int, int, str]], large_terminals: list[tuple[int, float]]
+) -> tuple[list[tuple[int, int, str]], int]:
+    """Filter removal list to protect the largest terminal vessel."""
+    if not large_terminals:
+        return to_remove, 0
+
+    # Sort by diameter (largest first) and get the largest
+    large_terminals.sort(key=lambda x: x[1], reverse=True)
+    largest_terminal_node = large_terminals[0][0]
+    largest_diameter = large_terminals[0][1]
+
+    logger.info(
+        f"Protecting largest terminal vessel: node {largest_terminal_node} (diameter={largest_diameter:.2f})"
+    )
+
+    # Filter out the largest terminal from removal list
+    filtered_to_remove = []
+    protected_count = 0
+
+    for node, parent, edge_id in to_remove:
+        if node != largest_terminal_node:
+            filtered_to_remove.append((node, parent, edge_id))
+        else:
+            logger.info(
+                f"Protected large terminal vessel from removal: node {node} (ID: {edge_id})"
+            )
+            protected_count += 1
+
+    return filtered_to_remove, protected_count
+
+
 def _remove_artefact_branches(
     graph: nx.Graph, radius_ratio_threshold: float, length_ratio_threshold: float
 ) -> int:
-    """Remove terminal branches based on criteria and return count."""
+    """Remove terminal branches based on criteria and return count, with safety check for large terminals."""
     try:
+        # Count large terminal vessels before cleaning
+        initial_large_terminals = _count_large_terminal_vessels(
+            graph, min_diameter=10.0
+        )
+        logger.info(
+            f"Initial large terminal vessels (diameter >= 10mm): {initial_large_terminals}"
+        )
+
         logger.debug("Finding branches to remove")
         to_remove = _find_branches_to_remove(
             graph, radius_ratio_threshold, length_ratio_threshold
         )
         logger.debug("Found %d branches to remove", len(to_remove))
 
-        # Remove the marked branches
+        # Create a test copy to check what would happen after removal
+        test_graph = graph.copy()
+
+        # Test remove the marked branches
+        for node, parent, _ in to_remove:
+            if test_graph.has_edge(node, parent):
+                test_graph.remove_edge(node, parent)
+
+        # Remove any isolated nodes that result
+        test_graph.remove_nodes_from(list(nx.isolates(test_graph)))
+
+        # Count large terminals after test removal
+        final_large_terminals = _count_large_terminal_vessels(
+            test_graph, min_diameter=10.0
+        )
+        logger.info(
+            f"Large terminal vessels after test removal: {final_large_terminals}"
+        )
+
+        # Only apply protection logic if we would end up with 0 large terminals
+        if final_large_terminals < 1:
+            logger.warning(
+                f"Safety check triggered: Only {final_large_terminals} large terminals would remain. "
+                "Applying protection logic to preserve largest terminal vessel."
+            )
+
+            # Get large terminals and filter removal list
+            large_terminals = _get_large_terminal_vessels(graph, min_diameter=10.0)
+            filtered_to_remove, protected_count = _filter_removal_to_protect_largest(
+                to_remove, large_terminals
+            )
+
+            if protected_count > 0:
+                logger.info(
+                    f"Protected {protected_count} large terminal vessels from removal"
+                )
+                to_remove = filtered_to_remove
+        else:
+            logger.info(
+                f"Safety check passed: {final_large_terminals} large terminals will remain. Proceeding with normal cleaning."
+            )
+
+        # Apply the removals to the actual graph
         removed_ids = []
         for node, parent, edge_id in to_remove:
             try:
