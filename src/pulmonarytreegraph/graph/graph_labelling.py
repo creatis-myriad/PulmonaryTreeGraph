@@ -70,7 +70,7 @@ def _label_main_artery(graph: nx.DiGraph) -> None:
     graph.edges[root_node, first_bifurcation]["level"] = 1
     graph.edges[root_node, first_bifurcation]["name"] = "MPA"
     graph.edges[root_node, first_bifurcation]["lateral"] = "None"
-    graph.edges[root_node, first_bifurcation]["lobe"] = "None"
+    graph.edges[root_node, first_bifurcation]["lobe"] = ["None"]
 
     logger.info("Main pulmonary artery labeled")
 
@@ -93,7 +93,7 @@ def _label_laterality_and_bifurcation(graph: nx.DiGraph, lungs: dict) -> None:
         graph.edges[bifurcation_node, successor]["level"] = 2
         graph.edges[bifurcation_node, successor]["name"] = vessel_name
         graph.edges[bifurcation_node, successor]["lateral"] = lateral
-        graph.edges[bifurcation_node, successor]["lobe"] = "None"
+        graph.edges[bifurcation_node, successor]["lobe"] = ["None"]
 
         # Propagate laterality to all descendants
         _propagate_laterality(graph, successor, lateral)
@@ -102,43 +102,34 @@ def _label_laterality_and_bifurcation(graph: nx.DiGraph, lungs: dict) -> None:
 
 
 def _mark_interlobar_vessels(graph: nx.DiGraph) -> None:
-    """Mark vessels that connect multiple lobes as interlobar (batch processing), excluding level 2 RPA/LPA."""
+    """Mark vessels that connect multiple lobes as interlobar, but keep list format."""
     edges_to_update = []
 
     for u, v, data in graph.edges(data=True):
-        # Exclude level 2 vessels named RPA or LPA
+        # Skip MPA, RPA, LPA - they keep their ["None"] format
         if data.get("level") <= 2 and data.get("name") in ["MPA", "RPA", "LPA"]:
             continue
 
-        current_lobe = data.get("lobe", "unknown")
+        current_lobe = _normalize_lobe_to_list(data.get("lobe", []))
 
-        # Handle both list and string format
-        if isinstance(current_lobe, list):
-            if len(current_lobe) > 1:
-                # Multiple lobes - this is interlobar
-                lobe_str = "_".join(sorted(current_lobe))
-                edges_to_update.append(
-                    (u, v, current_lobe, f"Interlobar_{lobe_str}_{u}_{v}")
-                )
-            elif len(current_lobe) == 1:
-                # Single lobe
-                lobe = current_lobe[0]
-                edges_to_update.append((u, v, current_lobe, f"{lobe}_{u}_{v}"))
-            else:
-                # Empty list
-                edges_to_update.append((u, v, ["unknown"], f"Unknown_{u}_{v}"))
-                logger.warning(f"Edge {u}->{v} has empty lobe list")
+        # Update name based on lobe content, but keep lobe as list
+        if len(current_lobe) > 1:
+            # Multiple lobes - this is interlobar
+            lobe_str = "_".join(sorted(current_lobe))
+            edges_to_update.append(
+                (u, v, current_lobe, f"Interlobar_{lobe_str}_{u}_{v}")
+            )
+        elif len(current_lobe) == 1 and current_lobe[0] not in ["unknown", "None"]:
+            # Single lobe
+            lobe = current_lobe[0]
+            edges_to_update.append((u, v, current_lobe, f"{lobe}_{u}_{v}"))
         else:
-            # Handle string format (for backward compatibility)
-            if current_lobe not in ["unknown", "None"]:
-                edges_to_update.append(
-                    (u, v, [current_lobe], f"{current_lobe}_{u}_{v}")
-                )
-            else:
-                edges_to_update.append((u, v, ["unknown"], f"Unknown_{u}_{v}"))
+            # Empty or unknown
+            edges_to_update.append((u, v, ["unknown"], f"Unknown_{u}_{v}"))
 
-    for u, v, lobe, name in edges_to_update:
-        graph.edges[u, v]["lobe"] = lobe
+    # Apply updates - keep as lists for now
+    for u, v, lobe_list, name in edges_to_update:
+        graph.edges[u, v]["lobe"] = lobe_list
         graph.edges[u, v]["name"] = name
 
     logger.info("Processed %d edges for interlobar marking", len(edges_to_update))
@@ -156,6 +147,7 @@ def _label_remaining_as_level3(graph: nx.DiGraph) -> None:
     for u, v in unlabeled_edges:
         graph.edges[u, v]["level"] = 3
         graph.edges[u, v]["name"] = f"Level3_{u}_{v}"
+        graph.edges[u, v]["lobe"] = []
 
     logger.info("Labeled %d remaining vessels as level 3", len(unlabeled_edges))
 
@@ -210,27 +202,19 @@ def _find_sibling_lobe(graph: nx.DiGraph, u: int, v: int) -> tuple[str, list[str
     current_level = graph.edges[u, v].get("level", 3)
 
     # 1. First, check the parent edge's lobe information
-    parent_edge_data = None
     parent_is_interlobar = False
     grandparents = list(graph.predecessors(parent))
     if grandparents:
         grandparent = grandparents[0]
         if graph.has_edge(grandparent, parent):
             parent_edge_data = graph.edges[grandparent, parent]
-            parent_lobe = parent_edge_data.get("lobe", "unknown")
+            parent_lobe = _normalize_lobe_to_list(parent_edge_data.get("lobe", []))
 
-            # Handle parent lobe as list or string
-            if isinstance(parent_lobe, list):
-                if len(parent_lobe) > 1:
-                    parent_is_interlobar = True
-                    interlobar_lobes.extend(parent_lobe)
-                elif len(parent_lobe) == 1:
-                    all_lobes.append(parent_lobe[0])
-            elif parent_lobe == "interlobar":
+            if len(parent_lobe) > 1:
                 parent_is_interlobar = True
-                # For backward compatibility, if no list available
-            elif parent_lobe not in ["unknown", "None"]:
-                all_lobes.append(parent_lobe)
+                interlobar_lobes.extend(parent_lobe)
+            elif len(parent_lobe) == 1 and parent_lobe[0] not in ["unknown", "None"]:
+                all_lobes.append(parent_lobe[0])
 
     # 2. Then check sibling information
     sibling_single_lobes = []  # Track single-lobe siblings separately
@@ -238,24 +222,21 @@ def _find_sibling_lobe(graph: nx.DiGraph, u: int, v: int) -> tuple[str, list[str
         if sibling != u:  # Don't include the current edge's target
             if graph.has_edge(parent, sibling):
                 sibling_edge_data = graph.edges[parent, sibling]
-                sibling_lobe = sibling_edge_data.get("lobe", "unknown")
+                sibling_lobe = _normalize_lobe_to_list(
+                    sibling_edge_data.get("lobe", [])
+                )
                 sibling_level = sibling_edge_data.get("level", 3)
 
                 # Only consider siblings at the same level
                 if sibling_level == current_level:
-                    # Handle sibling lobe as list or string
-                    if isinstance(sibling_lobe, list):
-                        if len(sibling_lobe) > 1:
-                            interlobar_lobes.extend(sibling_lobe)
-                        elif len(sibling_lobe) == 1:
-                            all_lobes.append(sibling_lobe[0])
-                            sibling_single_lobes.append(sibling_lobe[0])
-                    elif sibling_lobe == "interlobar":
-                        # For backward compatibility
-                        pass
-                    elif sibling_lobe not in ["unknown", "None"]:
-                        all_lobes.append(sibling_lobe)
-                        sibling_single_lobes.append(sibling_lobe)
+                    if len(sibling_lobe) > 1:
+                        interlobar_lobes.extend(sibling_lobe)
+                    elif len(sibling_lobe) == 1 and sibling_lobe[0] not in [
+                        "unknown",
+                        "None",
+                    ]:
+                        all_lobes.append(sibling_lobe[0])
+                        sibling_single_lobes.append(sibling_lobe[0])
 
     # 3. Special case: Parent is interlobar but all siblings have the same single lobe
     if parent_is_interlobar and sibling_single_lobes:
@@ -300,36 +281,41 @@ def _label_unknown_vessels_with_sibling(graph: nx.DiGraph) -> int:
     unknown_edges = [
         (u, v, data)
         for u, v, data in graph.edges(data=True)
-        if data.get("lobe", "unknown") in ["unknown", "None"]
+        if _is_unknown_lobe(data.get("lobe", []))
     ]
 
     logger.info(
         f"Found {len(unknown_edges)} unknown edges to process with sibling labeling"
     )
 
-    labeled_count = 0
+    actually_labeled_count = 0
     for u, v, edge_data in unknown_edges:
-        current_lobe = edge_data.get("lobe", "unknown")
-        if current_lobe in ["unknown", "None"]:
+        current_lobe = edge_data.get("lobe", [])
+        if _is_unknown_lobe(current_lobe):
+            logger.debug(f"Processing edge {u}->{v}")
+
             sibling_lobe_label, all_lobes_list = _find_sibling_lobe(graph, u, v)
 
-            if sibling_lobe_label != "unknown" and all_lobes_list:
-                logger.info(
-                    f"Assigning lobe {sibling_lobe_label} to edge {u}->{v} based on sibling/parent info"
-                )
+            logger.debug(
+                f"  _find_sibling_lobe returned: lobe_label='{sibling_lobe_label}', all_lobes={all_lobes_list}"
+            )
 
+            if sibling_lobe_label != "unknown" and all_lobes_list:
                 # Set the lobe field as a list containing all lobes
                 edge_data["lobe"] = all_lobes_list.copy()
 
+                logger.info(
+                    f"Assigning lobe {sibling_lobe_label} to edge {u}->{v} based on sibling/parent info"
+                )
                 logger.debug(f"Edge {u}->{v} now has lobe={all_lobes_list}")
-                labeled_count += 1
+                actually_labeled_count += 1
             else:
                 logger.debug(f"Could not find sibling/parent lobe for edge {u}->{v}")
 
     logger.info(
-        f"Labeled {labeled_count} unknown vessels using sibling/parent information"
+        f"Labeled {actually_labeled_count} unknown vessels using sibling/parent information"
     )
-    return labeled_count
+    return actually_labeled_count
 
 
 def _trace_back_and_label(graph: nx.DiGraph, start_node: int, lobe: str) -> None:
@@ -376,6 +362,24 @@ def _trace_back_and_label(graph: nx.DiGraph, start_node: int, lobe: str) -> None
         current = parent
 
 
+def _is_unknown_lobe(lobe_data) -> bool:
+    """Check if lobe data represents unknown/unlabeled state."""
+    if isinstance(lobe_data, list):
+        return len(lobe_data) == 0 or (
+            len(lobe_data) == 1 and lobe_data[0] == "unknown"
+        )
+    else:
+        return lobe_data == "unknown"
+
+
+def _normalize_lobe_to_list(lobe_data) -> list:
+    """Convert lobe data to consistent list format."""
+    if isinstance(lobe_data, list):
+        return lobe_data
+    else:
+        return [lobe_data]
+
+
 def _label_lobes_from_endpoints(graph: nx.DiGraph, lobe_masks: dict) -> None:
     """Label lobes by tracing from endpoints back to level 2 (optimized with sibling/ancestor propagation)."""
     # Find all endpoints efficiently
@@ -383,54 +387,81 @@ def _label_lobes_from_endpoints(graph: nx.DiGraph, lobe_masks: dict) -> None:
 
     logger.debug("Processing %d endpoints for lobe labeling", len(endpoints))
 
+    successful_traces = 0
     for endpoint in endpoints:
         lobe = _get_endpoint_lobe(graph, endpoint, lobe_masks)
         if lobe != "unknown":
             _trace_back_and_label(graph, endpoint, lobe)
+            successful_traces += 1
 
     logger.info("Lobe labeling from endpoints complete")
 
-    # Run sibling labeling multiple times until no more assignments happen
-    max_iterations = 5
-    for iteration in range(max_iterations):
-        initial_unknown_count = len(
-            [
-                (u, v)
-                for u, v, data in graph.edges(data=True)
-                if data.get("lobe", "unknown") in ["unknown"]
-            ]
-        )
+    # Check initial state after endpoint tracing
+    unknown_after_endpoints = len(
+        [
+            (u, v)
+            for u, v, data in graph.edges(data=True)
+            if _is_unknown_lobe(data.get("lobe", []))
+        ]
+    )
 
+    if unknown_after_endpoints == 0:
+        logger.info("All lobes labeled successfully from endpoints")
+        return
+    else:
         logger.info(
-            f"Sibling labeling iteration {iteration + 1}: {initial_unknown_count} unknown edges"
+            f"After endpoint tracing: {unknown_after_endpoints} edges still unknown"
         )
 
-        labeled_count = _label_unknown_vessels_with_sibling(graph)
-
-        final_unknown_count = len(
-            [
-                (u, v)
-                for u, v, data in graph.edges(data=True)
-                if data.get("lobe", "unknown") in ["unknown"]
-            ]
-        )
-
-        logger.info(
-            f"After iteration {iteration + 1}: {final_unknown_count} unknown edges remain"
-        )
-
-        # print as warning the edges that still have unknown lobes
-        if final_unknown_count > 0:
-            logger.warning(
-                f"Edges with unknown lobes after iteration {iteration + 1}: {final_unknown_count}"
+        max_iterations = 10
+        for iteration in range(max_iterations):
+            initial_count = len(
+                [
+                    (u, v)
+                    for u, v, data in graph.edges(data=True)
+                    if _is_unknown_lobe(data.get("lobe", []))
+                ]
             )
-            for u, v, data in graph.edges(data=True):
-                if data.get("lobe", "unknown") == "unknown":
+
+            logger.info(
+                f"Sibling labeling iteration {iteration + 1}: {initial_count} unknown edges"
+            )
+
+            labeled_count = _label_unknown_vessels_with_sibling(graph)
+
+            final_count = len(
+                [
+                    (u, v)
+                    for u, v, data in graph.edges(data=True)
+                    if _is_unknown_lobe(data.get("lobe", []))
+                ]
+            )
+
+            actual_improvement = initial_count - final_count
+
+            logger.info(
+                f"After iteration {iteration + 1}: {final_count} unknown edges remain"
+            )
+            logger.info(
+                f"Function reported labeling {labeled_count}, actual improvement: {actual_improvement}"
+            )
+
+            # Show remaining unknown edges
+            if final_count > 0:
+                remaining_unknown = [
+                    (u, v)
+                    for u, v, data in graph.edges(data=True)
+                    if _is_unknown_lobe(data.get("lobe", []))
+                ]
+                for u, v in remaining_unknown:
                     logger.warning(f"Edge {u}->{v} has unknown lobe")
 
-        # If no improvement, stop
-        if labeled_count == 0:
-            break
+            # Stop if no actual improvement
+            if actual_improvement == 0:
+                logger.info(
+                    f"No actual improvement in iteration {iteration + 1}, stopping"
+                )
+                break
 
 
 def _create_hierarchical_levels(
@@ -780,6 +811,26 @@ def _mark_chain_as_visited(
         current = next_node
 
 
+def _convert_lobes_to_strings(graph: nx.DiGraph) -> None:
+    """Convert lobe lists to string format for final processing."""
+    for _, _, data in graph.edges(data=True):
+        lobe = data.get("lobe", [])
+
+        if isinstance(lobe, list):
+            if len(lobe) > 1:
+                # Multiple lobes - mark as interlobar
+                data["lobe"] = "interlobar"
+            elif len(lobe) == 1:
+                # Single lobe
+                data["lobe"] = lobe[0]
+            else:
+                # Empty list - mark as unknown
+                data["lobe"] = "unknown"
+        # If already string, leave as is
+
+    logger.info("Converted lobe data from lists to strings")
+
+
 def _add_segment_counts(graph: nx.DiGraph) -> dict[str, int]:
     """
     Count segment chains downstream of each vessel and add as attribute.
@@ -1001,12 +1052,12 @@ def label_graph(
     # Step 5: Mark interlobar vessels
     _mark_interlobar_vessels(graph)
 
-    # Step 6: Create hierarchical levels based on bifurcation rules with configurable thresholds
+    # Step 6 : Convert lobes to strings
+    _convert_lobes_to_strings(graph)
+
+    # Step 7: Create hierarchical levels based on bifurcation rules with configurable thresholds
     # logger.debug("Starting hierarchical level creation...")
     _create_hierarchical_levels(graph, diameter_threshold, length_threshold)
-
-    # Step 7: Label segments based on vessel properties
-    # _label_segments(graph)
 
     # Add level summary
     _print_level_summary(graph)
