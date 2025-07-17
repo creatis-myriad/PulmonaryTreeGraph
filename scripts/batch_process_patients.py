@@ -641,11 +641,11 @@ def main():
 Expected directory structure:
   data_dir/
   ├── arteries_mask/
-  │   ├── 0028_arteries.nii.gz
-  │   └── XXXX_arteries.nii.gz
+  │   ├── 0028.nii.gz
+  │   └── XXXX.nii.gz
   ├── embolies_mask/
-  │   ├── 0028_embolism.nii.gz
-  │   └── XXXX_embolism.nii.gz (optional)
+  │   ├── 0028.nii.gz
+  │   └── XXXX.nii.gz (optional)
   ├── images/
   │   ├── 0028.nii.gz
   │   └── XXXX.nii.gz (optional)
