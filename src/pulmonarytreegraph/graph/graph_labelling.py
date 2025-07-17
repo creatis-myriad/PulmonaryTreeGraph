@@ -1001,6 +1001,57 @@ def _print_level_summary(graph: nx.DiGraph) -> None:
     logger.info("=" * 50)
 
 
+def _check_lobe_masks(lobe_masks: dict) -> None:
+    """Check if lobe masks are empty and warn."""
+    empty_masks = []
+
+    for lobe_name, mask in lobe_masks.items():
+        if mask is None:
+            empty_masks.append(lobe_name)
+            logger.warning("Lobe mask for %s is None", lobe_name)
+        elif hasattr(mask, "sum"):
+            # For numpy arrays or similar
+            if mask.sum() == 0:
+                empty_masks.append(lobe_name)
+                logger.warning("Lobe mask for %s is empty (no voxels set)", lobe_name)
+        elif hasattr(mask, "__len__"):
+            # For lists or other sequences
+            if len(mask) == 0:
+                empty_masks.append(lobe_name)
+                logger.warning("Lobe mask for %s has zero length", lobe_name)
+
+    if empty_masks:
+        logger.warning("Found %d empty lobe masks: %s", len(empty_masks), empty_masks)
+        logger.warning("This may cause incomplete lobe labeling")
+    else:
+        logger.info("All lobe masks contain data")
+
+
+def _check_for_missing_lobes(graph: nx.DiGraph) -> None:
+    """Check if any expected lobes are missing from the labeled graph and warn."""
+    expected_lobes = {"RUL", "RML", "RLL", "LUL", "LLL"}
+    found_lobes = set()
+
+    # Collect all lobes found in the graph
+    for _, _, data in graph.edges(data=True):
+        lobe = data.get("lobe", "unknown")
+
+        # Handle both list and string formats
+        if isinstance(lobe, list):
+            for lobe_name in lobe:
+                if lobe_name in expected_lobes:
+                    found_lobes.add(lobe_name)
+        elif lobe in expected_lobes:
+            found_lobes.add(lobe)
+
+    missing_lobes = expected_lobes - found_lobes
+
+    if missing_lobes:
+        logger.warning("Missing lobes detected: %s", sorted(missing_lobes))
+    else:
+        logger.info("All expected lobes found in vessel tree: %s", sorted(found_lobes))
+
+
 def label_graph(
     graph: nx.DiGraph,
     lungs_dict: dict[str, any],
@@ -1037,6 +1088,9 @@ def label_graph(
         "LLL": lungs_dict["lung_lower_lobe_left"],
     }
 
+    # Check lobe masks before processing
+    _check_lobe_masks(lobe_masks)
+
     # Step 1: Label main artery (level 1)
     _label_main_artery(graph)
 
@@ -1058,6 +1112,9 @@ def label_graph(
     # Step 7: Create hierarchical levels based on bifurcation rules with configurable thresholds
     # logger.debug("Starting hierarchical level creation...")
     _create_hierarchical_levels(graph, diameter_threshold, length_threshold)
+
+    # Step 8: Check for missing lobes
+    _check_for_missing_lobes(graph)
 
     # Add level summary
     _print_level_summary(graph)
