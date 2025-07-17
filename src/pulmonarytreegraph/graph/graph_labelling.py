@@ -397,7 +397,7 @@ def _label_lobes_from_endpoints(graph: nx.DiGraph, lobe_masks: dict) -> None:
             [
                 (u, v)
                 for u, v, data in graph.edges(data=True)
-                if data.get("lobe", "unknown") in ["unknown", "None"]
+                if data.get("lobe", "unknown") in ["unknown"]
             ]
         )
 
@@ -411,13 +411,22 @@ def _label_lobes_from_endpoints(graph: nx.DiGraph, lobe_masks: dict) -> None:
             [
                 (u, v)
                 for u, v, data in graph.edges(data=True)
-                if data.get("lobe", "unknown") in ["unknown", "None"]
+                if data.get("lobe", "unknown") in ["unknown"]
             ]
         )
 
         logger.info(
             f"After iteration {iteration + 1}: {final_unknown_count} unknown edges remain"
         )
+
+        # print as warning the edges that still have unknown lobes
+        if final_unknown_count > 0:
+            logger.warning(
+                f"Edges with unknown lobes after iteration {iteration + 1}: {final_unknown_count}"
+            )
+            for u, v, data in graph.edges(data=True):
+                if data.get("lobe", "unknown") == "unknown":
+                    logger.warning(f"Edge {u}->{v} has unknown lobe")
 
         # If no improvement, stop
         if labeled_count == 0:
