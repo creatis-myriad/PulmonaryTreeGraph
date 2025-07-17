@@ -22,13 +22,27 @@ def skeleton_to_graph(
     Convert a skeleton (binary 3D array) to a pixel-level NetworkX graph.
     Adds 'radius' property to each node from the distance map.
     """
+    # Count input skeleton voxels
+    input_voxel_count = np.sum(skeleton > 0)
+    logger.info("Input skeleton contains %d voxels", input_voxel_count)
+
     adjacency_matrix, pixel_coordinates = skeleton_to_csgraph(skeleton, spacing=spacing)
     graph = from_scipy_sparse_array(adjacency_matrix)
+
+    # Count output nodes
+    output_node_count = graph.number_of_nodes()
+    logger.info("skeleton_to_csgraph produced %d nodes", output_node_count)
+    logger.info(
+        "Lost %d voxels in skeleton_to_csgraph conversion",
+        input_voxel_count - output_node_count,
+    )
+
     pixel_coordinates = np.asarray(pixel_coordinates).T
     for node_id in graph.nodes:
         pos = pixel_coordinates[node_id].tolist()
         graph.nodes[node_id]["pos"] = pos
         graph.nodes[node_id]["radius"] = distance_map[pos[0], pos[1], pos[2]]
+
     return graph
 
 
@@ -148,20 +162,64 @@ def mask_to_branch_graph(
 ) -> nx.Graph:
     """
     Complete pipeline: skeleton + distance map -> branch-level graph.
-
-    This function performs the full conversion process:
-    1. Converts skeleton to pixel-level graph with radius information
-    2. Merges pixel connections into branch-level graph
-    3. Adds metrics like radius, length and centerline to each branch
-
-    Parameters:
-    - skeleton: Binary 3D array representing vessel centerlines
-    - spacing: Voxel spacing in mm (z,y,x)
-    - distance_map: 3D array with distance values representing vessel radius
-
-    Returns:
-    - NetworkX graph with nodes at branch points and edges representing vessel segments
     """
+    # Count skeleton voxels
+    skeleton_voxel_count = np.sum(skeleton > 0)
+    logger.info("Original skeleton contains %d voxels", skeleton_voxel_count)
+
     pixel_graph = skeleton_to_graph(skeleton, distance_map, spacing)
+    logger.info(
+        "Pixel graph contains %d nodes, %d edges",
+        pixel_graph.number_of_nodes(),
+        pixel_graph.number_of_edges(),
+    )
+
     branch_graph = create_branch_graph(pixel_graph)
+
+    # Verify voxel coverage
+    verify_voxel_coverage(branch_graph, skeleton)
+
     return branch_graph
+
+
+def verify_voxel_coverage(
+    branch_graph: nx.Graph, original_skeleton: np.ndarray
+) -> None:
+    """Verify that all skeleton voxels are represented in the branch graph."""
+    original_voxel_count = np.sum(original_skeleton > 0)
+
+    # Count voxels covered by branch graph centerlines
+    covered_voxels = set()
+
+    for _, _, data in branch_graph.edges(data=True):
+        centerline = data.get("centerline", [])
+        for pos in centerline:
+            # Convert to integer coordinates
+            voxel_pos = tuple(int(round(coord)) for coord in pos)
+            # Ensure within bounds
+            if (
+                0 <= voxel_pos[0] < original_skeleton.shape[0]
+                and 0 <= voxel_pos[1] < original_skeleton.shape[1]
+                and 0 <= voxel_pos[2] < original_skeleton.shape[2]
+            ):
+                covered_voxels.add(voxel_pos)
+
+    covered_count = len(covered_voxels)
+    missing_count = original_voxel_count - covered_count
+    coverage_percentage = (
+        (covered_count / original_voxel_count) * 100 if original_voxel_count > 0 else 0
+    )
+
+    logger.info("Voxel coverage analysis:")
+    logger.info("  Original skeleton voxels: %d", original_voxel_count)
+    logger.info("  Covered by branch graph: %d", covered_count)
+    logger.info("  Missing voxels: %d", missing_count)
+    logger.info("  Coverage: %.2f%%", coverage_percentage)
+
+    if missing_count > 0:
+        logger.info(
+            "%d voxels from original skeleton missing in graph representation",
+            missing_count,
+        )
+    else:
+        logger.info("Perfect skeleton coverage achieved!")
