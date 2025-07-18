@@ -9,7 +9,7 @@ __pycache__
 tests
 test_fix
 workflows
-jean_zay
+jean_zay/*
 test_unknown
 test_missing_voxels
 test_missing_lobes
