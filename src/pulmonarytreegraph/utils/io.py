@@ -48,6 +48,18 @@ def save_mask(
     - affine_matrix: A 4x4 numpy array representing the affine transformation matrix.
     - path: The file path where the mask will be saved.
     """
+    # Convert floating point data to integer to avoid truncation warning
+    if np.issubdtype(data.dtype, np.floating):
+        # Round to nearest integer instead of truncating
+        data = np.round(data).astype(np.uint8)
+        logger.debug("Converted floating point data to integer type")
+
+    # Ensure header matches data type
+    if data.dtype != header.get_data_dtype():
+        header = header.copy()
+        header.set_data_dtype(data.dtype)
+        logger.debug("Updated header data type to match array: %s", data.dtype)
+
     img = nib.Nifti1Image(data, affine_matrix, header)
     nib.save(img, path)
 
@@ -347,10 +359,11 @@ def save_skeleton_from_graph(
     skeleton = skeleton.astype(np.uint8)
 
     # Update header to reflect correct data type
+    header = header.copy()
     header.set_data_dtype(np.uint8)
 
     # Save the recreated skeleton
-    save_mask(skeleton.astype(np.uint32), header, affine, output_path)
+    save_mask(skeleton, header, affine, output_path)
 
 
 def compare_skeletons(original: np.ndarray, recreated: np.ndarray) -> dict[str, Any]:
