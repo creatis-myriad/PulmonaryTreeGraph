@@ -24,8 +24,9 @@ from pulmonarytreegraph.emboli.embolie_construction import (
     create_embolism_objects,
 )
 from pulmonarytreegraph.utils.io import (
+    create_colored_embolism_masks,
     load_niftii,
-    save_mask,
+    save_embolism_masks,
 )
 from pulmonarytreegraph.utils.metrics import (
     calculate_total_volume,
@@ -59,7 +60,7 @@ def analyze_embolism_regions(
     try:
         # Load mask
         logger.info("Loading embolism mask from %s", mask_path)
-        mask_data, _, spacing, _ = load_niftii(mask_path)
+        mask_data, _, spacing, _ = load_niftii(mask_path, "embolism")
 
         # Create embolism objects (includes separation and volume calculation)
         embolism_objects = create_embolism_objects(
@@ -220,63 +221,6 @@ def generate_embolism_report(
         raise
 
 
-def save_embolism_masks(
-    embolism_objects: list[dict[str, Any]], original_mask_path: str, output_dir: str
-) -> list[str]:
-    """
-    Save individual embolism masks as NIfTI files.
-
-    Parameters:
-    - embolism_objects: List of embolism dictionaries
-    - original_mask_path: Path to original mask file (for header/affine)
-    - output_dir: Directory to save individual masks
-
-    Returns:
-    - List of saved file paths
-    """
-    logger.debug("Saving individual embolism masks to %s", output_dir)
-
-    # Load original mask for metadata
-    original_data, header, _, affine = load_niftii(original_mask_path)
-
-    os.makedirs(output_dir, exist_ok=True)
-    saved_paths = []
-
-    for embolism in embolism_objects:
-        try:
-            # Create individual mask
-            mask = np.zeros_like(original_data, dtype=np.uint8)
-            coords = embolism["coordinates"]
-
-            # Set embolism voxels
-            for coord in coords:
-                x, y, z = int(coord[0]), int(coord[1]), int(coord[2])
-                if (
-                    0 <= x < mask.shape[0]
-                    and 0 <= y < mask.shape[1]
-                    and 0 <= z < mask.shape[2]
-                ):
-                    mask[x, y, z] = 1
-
-            # Save mask
-            patient_name = embolism["patient_name"]
-            embolism_id = embolism["id"]
-            output_path = os.path.join(
-                output_dir, f"{patient_name}_embolism_{embolism_id}.nii.gz"
-            )
-
-            save_mask(mask, header, affine, output_path)
-            saved_paths.append(output_path)
-
-            logger.debug("Saved embolism %d mask: %s", embolism_id, output_path)
-
-        except (OSError, ValueError, KeyError, IndexError) as e:
-            logger.error("Error saving embolism %s: %s", embolism["id"], e)
-            raise RuntimeError(f"Error saving embolism {embolism['id']}: {e}") from e
-
-    return saved_paths
-
-
 def save_embolism_metrics(
     embolism_objects: list[dict[str, Any]], output_path: str
 ) -> None:
@@ -322,69 +266,6 @@ def save_embolism_metrics(
     except (OSError, ValueError) as e:
         logger.error("Error saving embolism metrics: %s", e)
         raise RuntimeError(f"Error saving embolism metrics: {e}") from e
-
-
-def create_colored_embolism_masks(
-    embolism_objects: list[dict[str, Any]],
-    original_mask_path: str,
-    output_dir: str,
-) -> str:
-    """
-    Create colored embolism mask where each embolism has its own color based on ID.
-
-    Parameters:
-    - embolism_objects: List of embolism dictionaries
-    - original_mask_path: Path to original embolism mask
-    - output_dir: Directory to save colored mask
-
-    Returns:
-    - Path to the saved colored mask
-    """
-    logger.info("Creating colored embolism mask with ID-based coloring")
-
-    try:
-        # Load original mask to get dimensions and metadata
-        mask_data, header, _, affine = load_niftii(original_mask_path)
-
-        # Create colored mask (same dimensions as original)
-        colored_mask = np.zeros_like(mask_data, dtype=np.uint16)
-
-        for embolism in embolism_objects:
-            embolism_id = embolism["id"]
-            coordinates = embolism["coordinates"]
-
-            # Color with the embolism ID directly (starting from 1 for visibility)
-            color_value = embolism_id + 1
-            for coord in coordinates:
-                colored_mask[coord[0], coord[1], coord[2]] = color_value
-
-            logger.debug("Colored embolism %d with value %d", embolism_id, color_value)
-
-        # Save colored mask
-        patient_name = (
-            embolism_objects[0]["patient_name"] if embolism_objects else "unknown"
-        )
-        output_filename = f"{patient_name}_embolisms_colored.nii.gz"
-        output_path = os.path.join(output_dir, output_filename)
-
-        # Update header for larger data type
-        colored_header = header.copy()
-        colored_header.set_data_dtype(np.uint16)
-
-        save_mask(colored_mask, colored_header, affine, output_path)
-
-        logger.info("Successfully created colored embolism mask: %s", output_path)
-        logger.info(
-            "Colored %d embolisms with values 1-%d",
-            len(embolism_objects),
-            len(embolism_objects),
-        )
-
-        return output_path
-
-    except (OSError, ValueError) as e:
-        logger.error("Error creating colored embolism mask: %s", e)
-        raise
 
 
 def analyze_embolisms_with_visualization(
