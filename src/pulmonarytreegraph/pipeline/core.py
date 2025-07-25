@@ -46,11 +46,11 @@ def preprocess_artery_mask(
     - Tuple of (skeleton_path, distance_map_path)
     """
     logger.info("Loading mask: %s", artery_path)
-    mask, header, spacing, affine = load_niftii(artery_path)
+    mask, header, spacing, affine = load_niftii(artery_path, "artery_mask")
 
     # Extract patient name and create output directory
     if output_dir is None:
-        patient_name = os.path.basename(artery_path).replace("_arteries.nii.gz", "")
+        patient_name = os.path.basename(artery_path).replace(".nii.gz", "")
         output_dir = os.path.join("results", patient_name)
 
     os.makedirs(output_dir, exist_ok=True)
@@ -58,10 +58,22 @@ def preprocess_artery_mask(
     logger.info("Creating skeleton and distance map...")
     skeleton, distance_map = create_skeleton_and_distance_map(mask, spacing)
     skeleton_path = os.path.join(output_dir, "skeleton.nii.gz")
-    save_mask(skeleton.astype(np.uint32), header, affine, skeleton_path)
+    save_mask(
+        skeleton.astype(np.uint32),
+        header,
+        affine,
+        skeleton_path,
+        mask_name="skeleton_original",
+    )
     logger.info("Skeleton saved: %s", skeleton_path)
     distance_map_path = os.path.join(output_dir, "distance_map.nii.gz")
-    save_mask(distance_map.astype(mask.dtype), header, affine, distance_map_path)
+    save_mask(
+        distance_map.astype(mask.dtype),
+        header,
+        affine,
+        distance_map_path,
+        mask_name="distance_map",
+    )
     logger.info("Distance map saved: %s", distance_map_path)
 
     return skeleton_path, distance_map_path
@@ -96,10 +108,10 @@ def build_graph_from_skeleton(
     os.makedirs(output_dir, exist_ok=True)
 
     logger.info("Loading skeleton: %s", skeleton_path)
-    skeleton, header, spacing, affine = load_niftii(skeleton_path)
+    skeleton, header, spacing, affine = load_niftii(skeleton_path, "skeleton_original")
 
     logger.info("Loading distance map: %s", distance_map_path)
-    distance_map, _, _, _ = load_niftii(distance_map_path)
+    distance_map, _, _, _ = load_niftii(distance_map_path, "distance_map")
 
     logger.info("Building branch graph...")
     branch_graph = mask_to_branch_graph(skeleton, spacing, distance_map)
@@ -148,6 +160,7 @@ def build_graph_from_skeleton(
             header_copy,
             affine,
             binary_skeleton_path,
+            mask_name="skeleton_from_branch_graph",
         )
         skeleton_paths["binary"] = binary_skeleton_path
         logger.info("Branch graph skeleton (binary) saved: %s", binary_skeleton_path)
@@ -163,6 +176,7 @@ def build_graph_from_skeleton(
             affine,
             edge_id_skeleton_path,
             "edge_id",
+            mask_name="skeleton_from_branch_graph_colored_edge_id",
         )
         skeleton_paths["edge_id"] = edge_id_skeleton_path
         logger.info("Branch graph skeleton (edge_id) saved: %s", edge_id_skeleton_path)
@@ -291,7 +305,9 @@ def clean_vessel_graph(
         if not original_skeleton_path:
             raise ValueError("original_skeleton_path required when save_skeleton=True")
 
-        skeleton_data, header, _, affine = load_niftii(original_skeleton_path)
+        skeleton_data, header, _, affine = load_niftii(
+            original_skeleton_path, "skeleton_original"
+        )
 
         # Save binary skeleton
         binary_skeleton_path = os.path.join(output_dir, "cleaned_graph_skeleton.nii.gz")
@@ -305,6 +321,7 @@ def clean_vessel_graph(
             header_copy,
             affine,
             binary_skeleton_path,
+            mask_name="skeleton_from_cleaned_graph",
         )
         skeleton_paths["binary"] = binary_skeleton_path
         logger.info("Cleaned graph skeleton (binary) saved: %s", binary_skeleton_path)
@@ -320,6 +337,7 @@ def clean_vessel_graph(
             affine,
             edge_id_skeleton_path,
             "edge_id",
+            mask_name="skeleton_from_cleaned_graph_colored_edge_id",
         )
         skeleton_paths["edge_id"] = edge_id_skeleton_path
         logger.info("Cleaned graph skeleton (edge_id) saved: %s", edge_id_skeleton_path)
@@ -371,7 +389,7 @@ def clean_vessel_graph(
                 arteries_mask_path=arteries_mask_path,
                 output_path=volume_output,
                 color_by=color_by,
-                colored_skeleton_path=colored_skeleton_path,  # Pass the colored skeleton path
+                colored_skeleton_path=colored_skeleton_path,
             )
             volume_paths[color_by] = volume_output
             logger.info("Vessel volume (%s) saved: %s", color_by, volume_output)
@@ -475,7 +493,9 @@ def orient_vessel_graph(
         if not original_skeleton_path:
             raise ValueError("original_skeleton_path required when save_skeleton=True")
 
-        skeleton_data, header, _, affine = load_niftii(original_skeleton_path)
+        skeleton_data, header, _, affine = load_niftii(
+            original_skeleton_path, "skeleton_original"
+        )
 
         # Save binary skeleton
         binary_skeleton_path = os.path.join(
@@ -491,6 +511,7 @@ def orient_vessel_graph(
             header_copy,
             affine,
             binary_skeleton_path,
+            mask_name="skeleton_from_oriented_graph",
         )
         skeleton_paths["binary"] = binary_skeleton_path
         logger.info("Oriented graph skeleton (binary) saved: %s", binary_skeleton_path)
@@ -506,6 +527,7 @@ def orient_vessel_graph(
             affine,
             edge_id_skeleton_path,
             "edge_id",
+            mask_name="skeleton_from_oriented_graph_colored_edge_id",
         )
         skeleton_paths["edge_id"] = edge_id_skeleton_path
         logger.info(
@@ -632,7 +654,7 @@ def label_vessel_graph(
     for mask_name, filename in mask_files.items():
         mask_path = os.path.join(lung_masks_dir, filename)
         if os.path.exists(mask_path):
-            mask_data, _, _, _ = load_niftii(mask_path)
+            mask_data, _, _, _ = load_niftii(mask_path, mask_name)
             lungs_dict[mask_name] = mask_data
             logger.info("✓ Loaded mask: %s", mask_name)
         else:
@@ -700,7 +722,9 @@ def label_vessel_graph(
         if not original_skeleton_path:
             raise ValueError("original_skeleton_path required when save_skeleton=True")
 
-        skeleton_data, header, _, affine = load_niftii(original_skeleton_path)
+        skeleton_data, header, _, affine = load_niftii(
+            original_skeleton_path, "skeleton_original"
+        )
 
         # Save binary skeleton
         binary_skeleton_path = os.path.join(output_dir, "labeled_graph_skeleton.nii.gz")
@@ -714,6 +738,7 @@ def label_vessel_graph(
             header_copy,
             affine,
             binary_skeleton_path,
+            mask_name="skeleton_from_labeled_graph",
         )
         skeleton_paths["binary"] = binary_skeleton_path
         logger.info("Labeled graph skeleton (binary) saved: %s", binary_skeleton_path)
@@ -729,6 +754,7 @@ def label_vessel_graph(
             affine,
             edge_id_skeleton_path,
             "edge_id",
+            mask_name="skeleton_from_labeled_graph_colored_edge_id",
         )
         skeleton_paths["edge_id"] = edge_id_skeleton_path
         logger.info("Labeled graph skeleton (edge_id) saved: %s", edge_id_skeleton_path)
@@ -744,6 +770,7 @@ def label_vessel_graph(
             affine,
             level_skeleton_path,
             "level",
+            mask_name="skeleton_from_labeled_graph_colored_level",
         )
         skeleton_paths["level"] = level_skeleton_path
         logger.info("Labeled graph skeleton (level) saved: %s", level_skeleton_path)
@@ -827,7 +854,7 @@ def analyze_embolisms_complete(
     Embolism analysis pipeline with vessel graph enrichment using integrate_embolism_into_graph.
     """
     logger.info("=" * 50)
-    logger.info("EMBOLISM ANALYSIS PIPELINE (SIMPLE)")
+    logger.info("EMBOLISM ANALYSIS PIPELINE")
     logger.info("=" * 50)
     logger.info("Patient: %s", patient_name)
     logger.info("Embolism mask: %s", embolism_mask_path)
@@ -858,7 +885,7 @@ def analyze_embolisms_complete(
                 "reason": "no_embolisms_detected",
             }
 
-        # Step 2: Vessel graph enrichment (simple)
+        # Step 2: Vessel graph enrichment
         if not vessel_graph_path or not vessel_mask_path:
             logger.warning("Vessel data not provided - returning basic results only")
             return {
@@ -868,9 +895,11 @@ def analyze_embolisms_complete(
                 "reason": "missing_vessel_data",
             }
 
-        logger.info("STEP 2: Vessel graph enrichment (simple)")
+        logger.info("STEP 2: Vessel graph enrichment")
         vessel_graph = load_graph(vessel_graph_path)
-        vessel_mask_data, _, vessel_spacing, _ = load_niftii(vessel_mask_path)
+        vessel_mask_data, _, vessel_spacing, _ = load_niftii(
+            vessel_mask_path, "vessel_volume"
+        )
 
         enriched_graph = integrate_embolism_into_graph(
             vessel_graph,
@@ -883,7 +912,7 @@ def analyze_embolisms_complete(
         if compute_transversal_obstruction:
             logger.info("Computing transversal obstruction for vessel segments...")
             # Load the embolism mask as obstruction_mask
-            obstruction_mask_data, _, _, _ = load_niftii(embolism_mask_path)
+            obstruction_mask_data, _, _, _ = load_niftii(embolism_mask_path, "embolism")
             enriched_graph = full_graph_transversal_obstructions(
                 vessel_mask=vessel_mask_data,
                 obstruction_mask=obstruction_mask_data,
@@ -918,14 +947,14 @@ def analyze_embolisms_complete(
         # Return results
         return {
             **basic_results,
-            "analysis_type": "simple_enrichment",
+            "analysis_type": "enrichment",
             "vessel_analysis_performed": True,
             "enriched_graph_paths": enriched_graph_paths,
             "_enriched_graph_object": enriched_graph,
         }
 
     except Exception as e:
-        logger.error("Error in simple embolism analysis pipeline: %s", e)
+        logger.error("Error in embolism analysis pipeline: %s", e)
         raise RuntimeError("Failed to complete embolism analysis pipeline") from e
 
 
@@ -973,7 +1002,7 @@ def process_patient_complete_pipeline(
     - Dictionary with all pipeline results
     """
     # Extract patient name and setup
-    patient_name = os.path.basename(artery_mask_path).replace("_arteries.nii.gz", "")
+    patient_name = os.path.basename(artery_mask_path).replace(".nii.gz", "")
 
     if output_dir is None:
         output_dir = os.path.join("results", patient_name)

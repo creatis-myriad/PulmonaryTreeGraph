@@ -74,10 +74,8 @@ def main():
         else:
             output_dir = args.output_dir
 
-        # Minimal user-facing logging
         logger.info("Orienting graph: %s -> %s", args.graph, output_dir)
 
-        # Only log non-default parameters
         if args.coordinate_format != "both":
             logger.info("Coordinate format: %s", args.coordinate_format)
         if args.save_skeleton:
@@ -85,7 +83,6 @@ def main():
         if args.save_colored_volumes:
             logger.info("Saving colored volumes: %s", args.save_colored_volumes)
 
-        # Call the pipeline function - let it handle detailed logging
         orient_vessel_graph(
             graph_path=args.graph,
             output_dir=output_dir,
@@ -96,7 +93,6 @@ def main():
             save_colored_volumes=args.save_colored_volumes,
         )
 
-        # Simple completion message
         logger.info("Graph orientation completed successfully!")
         return True
 

@@ -1070,12 +1070,7 @@ def label_graph(
     Returns:
     - Labeled graph
     """
-    logger.info("Starting simplified anatomical labeling")
-    logger.info(
-        "Using trunk vessel thresholds: diameter_ratio >= %s, length_ratio <= %s",
-        diameter_threshold,
-        length_threshold,
-    )
+    logger.info("Starting anatomical labeling")
 
     # Prepare lung masks
     lungs = {"right": lungs_dict["lung_right"], "left": lungs_dict["lung_left"]}

@@ -16,7 +16,7 @@ from pulmonarytreegraph.utils.metrics import compute_betti_numbers
 logger = logging.getLogger(__name__)
 
 
-def load_niftii(path: str) -> np.ndarray:
+def load_niftii(path: str, mask_name: str) -> np.ndarray:
     """
     Load a NIfTI mask file.
     Parameter:
@@ -25,7 +25,7 @@ def load_niftii(path: str) -> np.ndarray:
     img = nib.load(path)
     data = img.get_fdata()
 
-    validate_mask(data, mask_name=os.path.basename(path))
+    validate_mask(data, mask_name=mask_name)
 
     header = img.header
     spacing = header.get_zooms()
@@ -39,6 +39,7 @@ def save_mask(
     header: nib.nifti1.Nifti1Header,
     affine_matrix: np.ndarray,
     path: str,
+    mask_name: str = "mask",
 ) -> None:
     """
     Save a NIfTI mask file.
@@ -60,6 +61,7 @@ def save_mask(
         header.set_data_dtype(data.dtype)
         logger.debug("Updated header data type to match array: %s", data.dtype)
 
+    validate_mask(data, mask_name=mask_name)
     img = nib.Nifti1Image(data, affine_matrix, header)
     nib.save(img, path)
 
@@ -97,6 +99,57 @@ def validate_mask(mask: np.ndarray, mask_name: str = "mask") -> None:
     # Check if mask contains any foreground voxels
     if not np.any(mask > 0):
         raise ValueError(f"{mask_name} contains no foreground voxels (all values <= 0)")
+
+    # Check betti numbers if artery mask
+    betti_0, betti_1, betti_2 = compute_betti_numbers(mask)
+    if betti_0 == 0 and betti_1 == 0 and betti_2 == 0:
+        logger.info(
+            f"{mask_name} Betti numbers: (b0, {betti_0}), (b1, {betti_1}), (b2, {betti_2})"
+        )
+        raise ValueError(f"{mask_name} has invalid Betti numbers (0, 0, 0)")
+
+    if (
+        "distance_map" not in mask_name
+        and "colored" not in mask_name
+        and "embolism" not in mask_name
+        and "vessel" not in mask_name
+    ):
+        if betti_0 > 1:
+            logger.info(
+                f"{mask_name} Betti numbers: (b0, {betti_0}), (b1, {betti_1}), (b2, {betti_2})"
+            )
+            logger.warning(
+                f"{mask_name} has Betti-0 > 1 ({betti_0}), indicating multiple connected components"
+            )
+        if "artery" in mask_name:
+            logger.info(
+                f"{mask_name} Betti numbers: (b0, {betti_0}), (b1, {betti_1}), (b2, {betti_2})"
+            )
+            if betti_1 > 0:
+                logger.warning(
+                    (
+                        "%s has Betti-1 > 0 (%d), indicating loops in the mask. "
+                        "Loops can be caused by a fusion with a close vessel, or "
+                        "by leaking into a vein"
+                    ),
+                    mask_name,
+                    betti_1,
+                )
+        else:
+            if betti_1 > 0:
+                logger.info(
+                    f"{mask_name} Betti numbers: (b0, {betti_0}), (b1, {betti_1}), (b2, {betti_2})"
+                )
+                logger.warning(
+                    f"{mask_name} has Betti-1 > 0 ({betti_1}), indicating loops in the mask"
+                )
+        if betti_2 > 0:
+            logger.info(
+                f"{mask_name} Betti numbers: (b0, {betti_0}), (b1, {betti_1}), (b2, {betti_2})"
+            )
+            logger.warning(
+                f"{mask_name} has Betti-2 > 0 ({betti_2}), indicating a void/hole inside the mask"
+            )
 
 
 def generate_mask_metadata(
@@ -158,6 +211,30 @@ def save_graph(graph, path: str) -> None:
 
     # Convert all numpy arrays to lists recursively
     data_list = ndarray_to_list(data)
+
+    if graph.is_directed():
+        try:
+            # Will raise NetworkXNoCycle if no cycle is found
+            cycle = nx.find_cycle(graph, orientation="original")
+            logger.warning("Graph contains a cycle (directed): %s", cycle)
+            logger.debug(
+                "Node positions (for debugging): %s",
+                {node: data["pos"] for node, data in graph.nodes(data=True)},
+            )
+
+        except nx.exception.NetworkXNoCycle:
+            logger.info("Graph is directed and has no cycles")
+    else:
+        try:
+            # Will raise NetworkXNoCycle if no cycle is found
+            cycle = nx.find_cycle(graph)
+            logger.warning("Graph contains a cycle (undirected): %s", cycle)
+            logger.debug(
+                "Node positions (for debugging): %s",
+                {node: data["pos"] for node, data in graph.nodes(data=True)},
+            )
+        except nx.exception.NetworkXNoCycle:
+            logger.info("Graph is undirected and has no cycles")
 
     # Save to JSON file
     with open(path, "w", encoding="utf-8") as f:
@@ -225,7 +302,7 @@ def save_graph_with_real_coordinates(
     - reference_skeleton_path: Path to reference skeleton for affine matrix
     """
     # Load reference skeleton to get affine matrix
-    _, _, _, affine = load_niftii(reference_skeleton_path)
+    _, _, _, affine = load_niftii(reference_skeleton_path, "skeleton_original")
 
     # Apply affine transformation to convert coordinates
     graph_real_coords = apply_affine_to_graph(graph, affine)
@@ -313,6 +390,31 @@ def recreate_skeleton_from_graph(graph: nx.Graph, reference_shape: tuple) -> np.
     # Create skeleton as uint8 from the start
     skeleton = np.zeros(reference_shape, dtype=np.uint8)
 
+    # Check for cycles in the graph
+    if graph.is_directed():
+        try:
+            # Will raise NetworkXNoCycle if no cycle is found
+            cycle = nx.find_cycle(graph, orientation="original")
+            logger.warning("Graph contains a cycle (directed): %s", cycle)
+            logger.debug(
+                "Node positions (for debugging): %s",
+                {node: data["pos"] for node, data in graph.nodes(data=True)},
+            )
+
+        except nx.exception.NetworkXNoCycle:
+            logger.info("Graph is directed and has no cycles")
+    else:
+        try:
+            # Will raise NetworkXNoCycle if no cycle is found
+            cycle = nx.find_cycle(graph)
+            logger.warning("Graph contains a cycle (undirected): %s", cycle)
+            logger.debug(
+                "Node positions (for debugging): %s",
+                {node: data["pos"] for node, data in graph.nodes(data=True)},
+            )
+        except nx.exception.NetworkXNoCycle:
+            logger.info("Graph is undirected and has no cycles")
+
     # Fill skeleton from graph edges
     for _, _, edge_data in graph.edges(data=True):
         if "centerline" in edge_data:
@@ -339,7 +441,10 @@ def recreate_skeleton_from_graph(graph: nx.Graph, reference_shape: tuple) -> np.
 
 
 def save_skeleton_from_graph(
-    graph: nx.Graph, original_skeleton_path: str, output_path: str
+    graph: nx.Graph,
+    original_skeleton_path: str,
+    output_path: str,
+    mask_name: str = "skeleton_from_graph",
 ) -> None:
     """
     Recreate and save a skeleton NIfTI file from a NetworkX graph.
@@ -350,7 +455,9 @@ def save_skeleton_from_graph(
     - output_path: Path where the new skeleton will be saved
     """
     # Load original skeleton to get metadata
-    original_data, header, _, affine = load_niftii(original_skeleton_path)
+    original_data, header, _, affine = load_niftii(
+        original_skeleton_path, "skeleton_original"
+    )
 
     # Use recreate_skeleton_from_graph to generate the skeleton
     skeleton = recreate_skeleton_from_graph(graph, original_data.shape)
@@ -363,7 +470,7 @@ def save_skeleton_from_graph(
     header.set_data_dtype(np.uint8)
 
     # Save the recreated skeleton
-    save_mask(skeleton, header, affine, output_path)
+    save_mask(skeleton, header, affine, output_path, mask_name=mask_name)
 
 
 def compare_skeletons(original: np.ndarray, recreated: np.ndarray) -> dict[str, Any]:
@@ -513,6 +620,7 @@ def save_colored_skeleton_from_graph(
     affine,
     output_path: str,
     color_by: str = "edge_id",
+    mask_name: str = "colored_skeleton",
 ) -> None:
     """
     Save a colored skeleton from graph with different labels.
@@ -533,7 +641,13 @@ def save_colored_skeleton_from_graph(
     skeleton_header = header.copy()
     skeleton_header.set_data_dtype(np.uint16)  # Support more labels
 
-    save_mask(colored_skeleton.astype(np.uint32), skeleton_header, affine, output_path)
+    save_mask(
+        colored_skeleton.astype(np.uint32),
+        skeleton_header,
+        affine,
+        output_path,
+        mask_name=mask_name,
+    )
 
 
 def save_embolism_masks(
@@ -550,8 +664,10 @@ def save_embolism_masks(
     Returns:
     - List of saved file paths
     """
+    logger.debug("Saving individual embolism masks to %s", output_dir)
+
     # Load original mask for metadata
-    original_data, header, _, affine = load_niftii(original_mask_path)
+    original_data, header, _, affine = load_niftii(original_mask_path, "embolism")
 
     os.makedirs(output_dir, exist_ok=True)
     saved_paths = []
@@ -573,20 +689,20 @@ def save_embolism_masks(
                     mask[x, y, z] = 1
 
             # Save mask
-            patient_name = embolism["patient_name"]
-            embolism_number = embolism["number"]
+            patient_name = embolism["patient_name"].replace(".nii.gz", "")
+            embolism_id = embolism["id"]
             output_path = os.path.join(
-                output_dir, f"{patient_name}_embolism_{embolism_number}.nii.gz"
+                output_dir, f"{patient_name}_embolism_{embolism_id}.nii.gz"
             )
 
-            save_mask(mask.astype(np.uint32), header, affine, output_path)
+            save_mask(mask, header, affine, output_path, mask_name="embolism_mask")
             saved_paths.append(output_path)
 
-        except Exception as e:
-            # Re-raise exception to be handled by calling function
-            raise RuntimeError(
-                f"Error saving embolism {embolism['number']}: {e}"
-            ) from e
+            logger.debug("Saved embolism %d mask: %s", embolism_id, output_path)
+
+        except (OSError, ValueError, KeyError, IndexError) as e:
+            logger.error("Error saving embolism %s: %s", embolism["id"], e)
+            raise RuntimeError(f"Error saving embolism {embolism['id']}: {e}") from e
 
     return saved_paths
 
@@ -641,71 +757,70 @@ def save_embolism_metrics(
 def create_colored_embolism_masks(
     embolism_objects: list[dict[str, Any]],
     original_mask_path: str,
-    vessel_mask_path: str,
     output_dir: str,
-    color_by: str = "vessel_id",
-) -> list[str]:
+) -> str:
     """
-    Create colored embolism masks based on vessel or level labels.
+    Create colored embolism mask where each embolism has its own color based on ID.
 
     Parameters:
     - embolism_objects: List of embolism dictionaries
     - original_mask_path: Path to original embolism mask
-    - vessel_mask_path: Path to labeled vessel mask
-    - output_dir: Directory to save colored masks
-    - color_by: What to color by ("vessel_id" or "level_id")
+    - output_dir: Directory to save colored mask
 
     Returns:
-    - List of saved colored mask paths
+    - Path to the saved colored mask
     """
-    try:
-        # Load masks
-        original_data, header, _, affine = load_niftii(original_mask_path)
-        vessel_data, _, _, _ = load_niftii(vessel_mask_path)
+    logger.info("Creating colored embolism mask with ID-based coloring")
 
-        os.makedirs(output_dir, exist_ok=True)
-        saved_paths = []
+    try:
+        # Load original mask to get dimensions and metadata
+        mask_data, header, _, affine = load_niftii(original_mask_path, "embolism")
+
+        # Create colored mask (same dimensions as original)
+        colored_mask = np.zeros_like(mask_data, dtype=np.uint16)
 
         for embolism in embolism_objects:
-            # Create colored mask
-            colored_mask = np.zeros_like(original_data, dtype=np.uint16)
-            coords = embolism["coordinates"]
+            embolism_id = embolism["id"]
+            coordinates = embolism["coordinates"]
 
-            for coord in coords:
-                x, y, z = int(coord[0]), int(coord[1]), int(coord[2])
-                if (
-                    0 <= x < vessel_data.shape[0]
-                    and 0 <= y < vessel_data.shape[1]
-                    and 0 <= z < vessel_data.shape[2]
-                ):
-                    if color_by == "vessel_id":
-                        color_value = int(vessel_data[x, y, z])
-                    else:
-                        color_value = 1  # Default binary
+            # Color with the embolism ID directly (starting from 1 for visibility)
+            color_value = embolism_id + 1
+            for coord in coordinates:
+                colored_mask[coord[0], coord[1], coord[2]] = color_value
 
-                    colored_mask[x, y, z] = color_value
+            logger.debug("Colored embolism %d with value %d", embolism_id, color_value)
 
-            # Save colored mask
-            patient_name = embolism["patient_name"]
-            embolism_number = embolism["number"]
-            output_path = os.path.join(
-                output_dir,
-                f"{patient_name}_embolism_{embolism_number}_{color_by}.nii.gz",
-            )
+        # Save colored mask
+        patient_name = (
+            embolism_objects[0]["patient_name"] if embolism_objects else "unknown"
+        )
+        output_filename = f"{patient_name}_embolisms_colored.nii.gz"
+        output_path = os.path.join(output_dir, output_filename)
 
-            # Update header for larger data type
-            colored_header = header.copy()
-            colored_header.set_data_dtype(np.uint16)
+        # Update header for larger data type
+        colored_header = header.copy()
+        colored_header.set_data_dtype(np.uint16)
 
-            save_mask(
-                colored_mask.astype(np.uint32), colored_header, affine, output_path
-            )
-            saved_paths.append(output_path)
+        save_mask(
+            colored_mask,
+            colored_header,
+            affine,
+            output_path,
+            mask_name="embolism_colored",
+        )
 
-        return saved_paths
+        logger.info("Successfully created colored embolism mask: %s", output_path)
+        logger.info(
+            "Colored %d embolisms with values 1-%d",
+            len(embolism_objects),
+            len(embolism_objects),
+        )
 
-    except Exception as e:
-        raise RuntimeError(f"Error creating colored embolism masks: {e}") from e
+        return output_path
+
+    except (OSError, ValueError) as e:
+        logger.error("Error creating colored embolism mask: %s", e)
+        raise
 
 
 def _iterative_vessel_expansion_from_skeleton_pronblem(
@@ -1106,11 +1221,11 @@ def save_colored_vessel_volume_from_graph(
         # Load input data
         logger.debug("Loading skeleton data from: %s", reference_skeleton_path)
         skeleton_data, skeleton_header, _, skeleton_affine = load_niftii(
-            reference_skeleton_path
+            reference_skeleton_path, "skeleton_original"
         )
 
         logger.debug("Loading arteries mask from: %s", arteries_mask_path)
-        arteries_data, _, _, _ = load_niftii(arteries_mask_path)
+        arteries_data, _, _, _ = load_niftii(arteries_mask_path, "arteries")
 
         # Validate data compatibility
         if skeleton_data.shape != arteries_data.shape:
@@ -1123,7 +1238,9 @@ def save_colored_vessel_volume_from_graph(
             logger.debug(
                 "Using pre-existing colored skeleton: %s", colored_skeleton_path
             )
-            colored_skeleton_data, _, _, _ = load_niftii(colored_skeleton_path)
+            colored_skeleton_data, _, _, _ = load_niftii(
+                colored_skeleton_path, "skeleton_colored"
+            )
 
             # Validate colored skeleton compatibility
             if colored_skeleton_data.shape != skeleton_data.shape:
@@ -1194,6 +1311,7 @@ def save_colored_vessel_volume_from_graph(
             output_header,
             skeleton_affine,
             output_path,
+            mask_name=f"colored_vessel_volume_{color_by}",
         )
         logger.info("Successfully saved colored vessel volume to: %s", output_path)
 
