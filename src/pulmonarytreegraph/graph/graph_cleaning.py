@@ -17,12 +17,32 @@ logger = logging.getLogger(__name__)
 
 
 def remove_isolated_nodes(graph: nx.Graph) -> None:
-    """Remove nodes that have no connections in the graph."""
+    """
+    Remove nodes that have no connections in the graph.
+    in-place.
+
+    Args:
+        graph: NetworkX graph to clean (modified in-place)
+    """
     graph.remove_nodes_from(list(nx.isolates(graph)))
 
 
 def get_cycle_edges(graph: nx.Graph) -> list[list[tuple[int, int]]]:
-    """Get all cycles as lists of edges."""
+    """
+    Detect and return all cycles in the graph as lists of edges.
+
+    This function finds all fundamental cycles in the graph using NetworkX's
+    cycle_basis algorithm and converts each cycle from a list of nodes to
+    a list of edges (node pairs). Each cycle is represented as a closed
+    path of edges.
+
+    Args:
+        graph: NetworkX graph to analyze
+
+    Returns:
+        List of cycles, where each cycle is a list of edges (tuples of node pairs).
+        Empty list if no cycles are found.
+    """
     cycles = nx.cycle_basis(graph)
     return [
         [(cycle[i], cycle[(i + 1) % len(cycle)]) for i in range(len(cycle))]
@@ -33,7 +53,34 @@ def get_cycle_edges(graph: nx.Graph) -> list[list[tuple[int, int]]]:
 def detect_radius_pattern(
     radius_list: list[float], threshold_factor: float = 0.5
 ) -> bool:
-    """Detect if a vessel segment shows a significant decrease then increase in radius."""
+    """
+    Detect suspicious radius patterns indicating false vascular connections.
+
+    This function identifies vessel segments showing a "constriction pattern":
+    a significant decrease followed by an increase in radius. Such patterns
+    are characteristic of false connections between closely spaced vessels,
+    where the skeleton algorithm incorrectly bridges two separate structures.
+
+    Args:
+        radius_list: Sequence of radius values along the vessel segment.
+                    Can be list, tuple, or numpy array (handles nested structures)
+        threshold_factor: Minimum ratio for both decrease and increase phases
+                         to be considered significant (default: 0.5)
+
+    Returns:
+        bool: True if a constriction pattern is detected, False otherwise
+
+    Algorithm:
+        1. Find minimum radius and its position
+        2. If minimum is at endpoints, return False (normal tapering)
+        3. Calculate decrease ratio: (max_before - min) / max_before
+        4. Calculate increase ratio: (max_after - min) / min
+        5. Return True if both ratios exceed threshold
+
+    Note:
+        Robust to various input formats (numpy arrays, nested lists, scalars).
+        Returns False for invalid/insufficient data or processing errors.
+    """
     try:
         # Debug: Print the input type and structure
         logger.debug("Input radius_list type: %s", type(radius_list))
@@ -149,7 +196,21 @@ def detect_radius_pattern(
 
 
 def get_edge_data(graph: nx.Graph, node1: int, node2: int) -> dict | None:
-    """Safely get edge data regardless of edge orientation."""
+    """
+    Safely retrieve edge data regardless of edge orientation.
+
+    NetworkX edges can be accessed in either direction (node1->node2 or
+    node2->node1). This function attempts both orientations and returns
+    the edge data if the edge exists, or None if not found.
+
+    Args:
+        graph: NetworkX graph containing the edge
+        node1: First node of the edge
+        node2: Second node of the edge
+
+    Returns:
+        dict: Edge attributes dictionary if edge exists, None otherwise
+    """
     if graph.has_edge(node1, node2):
         return graph.edges[node1, node2]
     elif graph.has_edge(node2, node1):
@@ -165,7 +226,23 @@ def get_edge_data(graph: nx.Graph, node1: int, node2: int) -> dict | None:
 def _is_fusion_candidate(
     graph: nx.Graph, node: int, processed_nodes: set
 ) -> tuple[bool, list[int]]:
-    """Check if a node is a valid candidate for fusion and return its neighbors."""
+    """
+    Determine if a node is eligible for linear segment fusion.
+
+    A node is eligible for fusion if it:
+    - Has not been processed yet
+    - Has exactly 2 neighbors (is on a linear path)
+    - Both edges to neighbors exist
+
+    Args:
+        graph: NetworkX graph being processed
+        node: Node to evaluate for fusion eligibility
+        processed_nodes: Set of already processed nodes to skip
+
+    Returns:
+        tuple: (is_eligible: bool, neighbors: list[int])
+               neighbors list is empty if not eligible
+    """
     if node in processed_nodes or not graph.has_node(node):
         return False, []
 
@@ -189,7 +266,32 @@ def _combine_edge_segments(
     edge2_centerline: np.ndarray,
     edge2_radius: np.ndarray,
 ) -> tuple[list, list]:
-    """Combine two oriented edge segments, removing duplicate middle point."""
+    """
+    Combine two oriented edge segments into a single continuous segment.
+
+    This function merges two consecutive edge segments by concatenating their
+    geometric properties (centerlines and radii). It removes duplicate points
+    at the connection to ensure continuity. Assumes input segments are properly
+    oriented (edge1 ends where edge2 starts).
+
+    Args:
+        edge1_centerline: 3D coordinates of first segment
+        edge1_radius: Radius values along first segment
+        edge2_centerline: 3D coordinates of second segment
+        edge2_radius: Radius values along second segment
+
+    Returns:
+        tuple: (combined_centerline: list, combined_radius: list)
+               Empty centerline list if input data is insufficient
+
+    Algorithm:
+        1. Convert inputs to numpy arrays for processing
+        2. If both centerlines have data:
+           - Remove duplicate middle point (edge1[:-1] + edge2)
+           - Concatenate radius arrays
+        3. If no centerline data: concatenate only radius arrays
+    """
+
     # Ensure inputs are numpy arrays
     edge1_centerline = np.asarray(edge1_centerline)
     edge2_centerline = np.asarray(edge2_centerline)
@@ -228,7 +330,28 @@ def _create_fused_edge_data(
     combined_radius: list,
     edge_id: int,
 ) -> dict:
-    """Create new edge data for the fused segment."""
+    """
+    Create comprehensive edge attributes for a fused segment.
+
+    This function combines properties from two original edges into a new
+    edge dictionary with updated geometric properties and statistics.
+
+    Args:
+        edge1_data: Attributes dictionary from first edge
+        edge2_data: Attributes dictionary from second edge
+        combined_centerline: Merged 3D coordinate sequence
+        combined_radius: Merged radius sequence
+        edge_id: Unique identifier for the new fused edge
+
+    Returns:
+        dict: Complete edge attributes dictionary with:
+              - length: Sum of original lengths
+              - mean_radius: Average of combined radius values
+              - min/max_radius: Extrema of combined radii
+              - centerline, radius: Combined geometric data
+              - id, name: New identifiers
+              - Other attributes copied from first edge
+    """
     combined_length = edge1_data.get("length", 0) + edge2_data.get("length", 0)
     combined_mean_radius = np.mean(combined_radius) if combined_radius else 0
     min_radius = min(combined_radius) if combined_radius else 0
@@ -256,7 +379,33 @@ def _create_fused_edge_data(
 def _fuse_two_segments(
     graph: nx.Graph, middle_node: int, neighbor1: int, neighbor2: int, edge_id: int
 ) -> tuple[dict, bool]:
-    """Fuse two segments connected by a middle node."""
+    """
+    Execute the fusion of two segments connected by a middle node.
+
+    This function handles the complex process of merging two edges that
+    share a common middle node. It properly orients the segments, combines
+    their geometric properties, and creates new edge data.
+
+    Args:
+        graph: NetworkX graph containing the segments
+        middle_node: Intermediate node to be removed during fusion
+        neighbor1: First endpoint of the fused segment
+        neighbor2: Second endpoint of the fused segment
+        edge_id: Unique identifier for the new fused edge
+
+    Returns:
+        tuple: (new_edge_data: dict, success: bool)
+               success is always True if function completes
+
+    Algorithm:
+        1. Extract edge data and node positions
+        2. Determine proper orientation for each segment:
+           - Segment 1: neighbor1 → middle_node
+           - Segment 2: middle_node → neighbor2
+        3. Orient segments by reversing if necessary
+        4. Combine oriented segments using _combine_edge_segments
+        5. Create comprehensive new edge data
+    """
     # Get edge data and positions
     edge1_data = graph.edges[middle_node, neighbor1]
     edge2_data = graph.edges[middle_node, neighbor2]
@@ -332,8 +481,26 @@ def _fuse_two_segments(
 
 def fuse_linear_segments(graph: nx.Graph) -> nx.Graph:
     """
-    Fuse linear segments where nodes have exactly 2 neighbors.
-    Connects neighbor1 -> middle_node -> neighbor2 into neighbor1 -> neighbor2.
+    Simplify graph by fusing consecutive linear segments into single edges.
+
+    This function identifies nodes with exactly 2 neighbors (intermediate points
+    on linear paths) and merges the adjacent edges into single edges. This
+    reduces graph complexity while preserving all geometric information.
+
+    Args:
+        graph: NetworkX graph to simplify (not modified)
+
+    Returns:
+        nx.Graph: New graph with linear segments fused
+
+    Algorithm:
+        1. Identify all degree-2 nodes (fusion candidates)
+        2. For each candidate:
+           - Verify eligibility and get 2 neighbors
+           - Fuse the two connecting edges
+           - Remove middle node, add new edge between neighbors
+        3. Track processed nodes to avoid conflicts
+        4. Assign sequential IDs to new fused edges
     """
     graph = graph.copy()
     fused_count = 0
@@ -390,7 +557,31 @@ def _should_remove_branch(
     radius_ratio_threshold: float,
     length_ratio_threshold: float,
 ) -> bool:
-    """Determine if a terminal branch should be removed based on criteria."""
+    """
+    Apply morphological criteria to determine if a terminal branch is artifactual.
+
+    This function evaluates terminal branches against anatomical plausibility
+    criteria. Branches that are very short or both thin and relatively short
+    are considered artifacts from segmentation or skeletonization.
+
+    Args:
+        _node: Terminal node (unused, kept for interface consistency)
+        _parent: Parent node (unused, kept for interface consistency)
+        edge_data: Dictionary containing edge properties (length, etc.)
+        parent_radius: Radius at the parent node
+        end_radius: Radius at the terminal node
+        radius_ratio_threshold: Minimum ratio end_radius/parent_radius to keep. default 0.3
+        length_ratio_threshold: Length threshold relative to parent diameter. default 1.5
+
+    Returns:
+        bool: True if branch should be removed, False if it should be kept
+
+    Criteria:
+        1. Very short: length < parent_diameter → remove
+        2. Thin and relatively short:
+           length < parent_diameter * length_ratio AND
+           radius_ratio < radius_ratio_threshold → remove
+    """
     length = edge_data.get("length", 0)
 
     # Ensure parent_radius is a scalar
@@ -431,7 +622,35 @@ def _should_remove_branch(
 def _find_branches_to_remove(
     graph: nx.Graph, radius_ratio_threshold: float, length_ratio_threshold: float
 ) -> list[tuple[int, int, str]]:
-    """Find all terminal branches that should be removed (optimized)."""
+    """
+    Identify all terminal branches that meet removal criteria.
+
+    This function efficiently scans all terminal nodes (degree 1) and
+    evaluates their connecting edges against morphological criteria for
+    artifact removal.
+
+    Args:
+        graph: NetworkX graph to analyze
+        radius_ratio_threshold: Minimum end/parent radius ratio to preserve
+        length_ratio_threshold: Length threshold factor relative to parent diameter
+
+    Returns:
+        list: Tuples of (terminal_node, parent_node, edge_id) for removal
+              Empty list if no branches meet removal criteria
+
+    Algorithm:
+        1. Pre-filter nodes to terminal nodes only (degree == 1)
+        2. For each terminal node:
+           - Get parent node and edge data
+           - Extract radius values (ensure scalar conversion)
+           - Apply _should_remove_branch criteria
+           - Add to removal list if criteria met
+        3. Return complete removal list for batch processing
+
+    Optimization:
+        Pre-filtering terminal nodes improves performance on large graphs
+        compared to checking all nodes.
+    """
     to_remove = []
 
     # Pre-filter terminal nodes for better performance
@@ -466,7 +685,31 @@ def _find_branches_to_remove(
 
 
 def remove_single_neighbor_nodes(graph: nx.Graph) -> nx.Graph:
-    """Remove nodes with single neighbors (optimized version)."""
+    """
+    Iteratively remove terminal nodes connected by very short edges.
+
+    This function removes terminal artifacts: nodes with single neighbors
+    connected by edges shorter than 1.0 mm. These typically represent
+    noise or pixel-level artifacts that survived earlier cleaning steps.
+
+    Args:
+        graph: NetworkX graph to clean (not modified)
+
+    Returns:
+        nx.Graph: New graph with short terminal segments removed
+
+    Algorithm:
+        1. While changes occur:
+           - Find all degree-1 nodes with edge length < 1.0 mm
+           - Remove all such nodes in batch
+           - Update removal count
+        2. Continue until no more nodes meet criteria
+        3. Log total removals for monitoring
+
+    Iterative Design:
+        Removal of nodes may create new terminal nodes, so iteration
+        continues until convergence (no new nodes to remove).
+    """
     graph = graph.copy()
     removed_count = 0
 
@@ -498,7 +741,28 @@ def remove_single_neighbor_nodes(graph: nx.Graph) -> nx.Graph:
 
 
 def _remove_suspicious_cycle_edges(graph: nx.Graph) -> int:
-    """Remove suspicious edges in cycles and return count."""
+    """
+    Detect and remove edges in cycles that show suspicious radius patterns.
+
+    Vascular networks are typically tree-like; cycles usually indicate false
+    connections created during segmentation due to close proximity of vessels.
+    This function identifies cycles and removes edges showing constriction
+    patterns characteristic of artifacts.
+
+    Args:
+        graph: NetworkX graph to clean (modified in-place)
+
+    Returns:
+        int: Number of edges removed
+
+    Algorithm:
+        1. Detect all cycles using get_cycle_edges()
+        2. For each edge in each cycle:
+           - Extract radius profile along the edge
+           - Test for constriction pattern using detect_radius_pattern()
+           - Remove edge if pattern detected
+        3. Log removed edge IDs for traceability
+    """
     removed_edges = []
 
     try:
@@ -551,7 +815,37 @@ def _remove_suspicious_cycle_edges(graph: nx.Graph) -> int:
 
 
 def _count_large_terminal_vessels(graph: nx.Graph, min_diameter: float = 10.0) -> int:
-    """Count terminal vessels (degree 1) with large mean diameter."""
+    """
+    Count terminal vessels with diameter above threshold for safety validation.
+
+    This function counts major terminal vessels to ensure cleaning operations
+    don't accidentally remove important anatomical structures. Used in safety
+    checks to prevent over-aggressive cleaning.
+
+    Args:
+        graph: NetworkX graph to analyze
+        min_diameter: Minimum mean diameter (mm) to consider vessel "large"
+
+    Returns:
+        int: Number of terminal vessels meeting diameter criteria
+
+    Algorithm:
+        1. Filter nodes to terminal nodes (degree == 1)
+        2. For each terminal node:
+           - Get connecting edge data
+           - Calculate mean diameter from edge mean_radius
+           - Count if diameter >= threshold
+        3. Log detected large terminals for verification
+
+    Use Cases:
+        - Pre-cleaning validation: ensure sufficient large terminals exist
+        - Post-cleaning validation: verify large terminals preserved
+        - Safety thresholds: prevent removal if would leave < 1 large terminal
+
+    Note:
+        Threshold of 10.0 mm chosen to identify major pulmonary vessels
+        that should be preserved regardless of other criteria.
+    """
     count = 0
     terminal_nodes = [node for node in graph.nodes if graph.degree(node) == 1]
 
@@ -574,7 +868,25 @@ def _count_large_terminal_vessels(graph: nx.Graph, min_diameter: float = 10.0) -
 def _get_large_terminal_vessels(
     graph: nx.Graph, min_diameter: float = 10.0
 ) -> list[tuple[int, float]]:
-    """Get terminal vessels (degree 1) with large mean diameter and their diameters."""
+    """
+    Retrieve terminal vessels exceeding diameter threshold with their measurements.
+
+    Similar to _count_large_terminal_vessels but returns detailed information
+    about each large terminal vessel including node ID and diameter. Used
+    for protective logic during aggressive cleaning operations.
+
+    Args:
+        graph: NetworkX graph to analyze
+        min_diameter: Minimum mean diameter (mm) to consider vessel "large"
+
+    Returns:
+        list: Tuples of (node_id, diameter) for each large terminal vessel
+              Sorted by diameter (largest first) when used in protection logic
+
+    Note:
+        Enables targeted protection of specific large terminals during
+        cleaning operations that might otherwise remove them.
+    """
     large_terminals = []
     terminal_nodes = [node for node in graph.nodes if graph.degree(node) == 1]
 
@@ -594,7 +906,32 @@ def _get_large_terminal_vessels(
 def _filter_removal_to_protect_largest(
     to_remove: list[tuple[int, int, str]], large_terminals: list[tuple[int, float]]
 ) -> tuple[list[tuple[int, int, str]], int]:
-    """Filter removal list to protect the largest terminal vessel."""
+    """
+    Filter branch removal list to protect the largest terminal vessel.
+
+    This safety mechanism prevents over-aggressive cleaning by ensuring
+    the largest terminal vessel is never removed, even if it meets other
+    removal criteria. Critical for preserving anatomical integrity.
+
+    Args:
+        to_remove: List of (node, parent, edge_id) tuples marked for removal
+        large_terminals: List of (node, diameter) tuples for large terminals
+
+    Returns:
+        tuple: (filtered_removal_list, protected_count)
+               filtered_removal_list excludes protected terminals
+               protected_count is number of vessels protected
+
+    Algorithm:
+        1. Sort large terminals by diameter (largest first)
+        2. Identify largest terminal vessel
+        3. Filter removal list to exclude largest terminal
+        4. Log protection action for verification
+
+    Safety Logic:
+        Activated when cleaning would result in < 1 large terminal vessel
+        remaining, ensuring anatomically important structures survive.
+    """
     if not large_terminals:
         return to_remove, 0
 
@@ -626,7 +963,41 @@ def _filter_removal_to_protect_largest(
 def _remove_artefact_branches(
     graph: nx.Graph, radius_ratio_threshold: float, length_ratio_threshold: float
 ) -> int:
-    """Remove terminal branches based on criteria and return count, with safety check for large terminals."""
+    """
+    Remove terminal branches identified as artifacts with safety protections.
+
+    This is the main branch cleaning function that removes short, thin, or
+    otherwise artifactual terminal branches while implementing safety checks
+    to preserve important anatomical structures.
+
+    Args:
+        graph: NetworkX graph to clean (modified in-place)
+        radius_ratio_threshold: Minimum end/parent radius ratio to preserve branches
+        length_ratio_threshold: Length factor relative to parent diameter
+
+    Returns:
+        int: Number of branches removed
+
+    Algorithm:
+        1. Count initial large terminal vessels for baseline
+        2. Identify all branches meeting removal criteria
+        3. Test removal impact on large terminal vessel count
+        4. If < 1 large terminal would remain:
+           - Apply protection logic to preserve largest terminal
+           - Filter removal list accordingly
+        5. Apply filtered removals to graph
+        6. Log detailed removal statistics
+
+    Safety Features:
+        - Pre-removal simulation to assess impact
+        - Automatic protection of largest terminal if needed
+        - Comprehensive logging for verification
+        - Error handling for individual branch failures
+
+    Note:
+        Central function for morphological cleaning. Balances aggressive
+        artifact removal with anatomical structure preservation.
+    """
     try:
         # Count large terminal vessels before cleaning
         initial_large_terminals = _count_large_terminal_vessels(
@@ -713,7 +1084,28 @@ def _remove_artefact_branches(
 
 
 def _validate_graph_structure(graph: nx.Graph) -> bool:
-    """Validate that graph has required attributes."""
+    """
+    Verify that graph contains required node and edge attributes.
+
+    This validation function ensures the input graph has the necessary
+    attributes for cleaning operations. Prevents runtime errors and
+    provides clear feedback about missing data.
+
+    Args:
+        graph: NetworkX graph to validate
+
+    Returns:
+        bool: True if graph structure is valid, False otherwise
+
+    Validation Checks:
+        - Node attributes: "radius", "pos" (required)
+        - Edge attributes: "length", "radius", "centerline", "id" (optional)
+        - Empty graph handling (considered valid)
+
+    Note:
+        Called at start of cleaning pipeline to catch structural issues early.
+        Missing optional attributes logged as debug messages only.
+    """
     if graph.number_of_nodes() == 0:
         return True
 
@@ -740,7 +1132,26 @@ def _validate_graph_structure(graph: nx.Graph) -> bool:
 
 
 def get_graph_stats(graph: nx.Graph) -> dict[str, int]:
-    """Get basic graph statistics."""
+    """
+    Calculate graph statistics for monitoring and logging.
+
+    Args:
+        graph: NetworkX graph to analyze
+
+    Returns:
+        dict: Statistics dictionary containing:
+              - nodes: Total node count
+              - edges: Total edge count
+              - terminals: Nodes with degree 1 (vessel endpoints)
+              - branches: Nodes with degree 3+ (bifurcations/junctions)
+              - linear: Nodes with degree 2 (intermediate points)
+
+    Use Cases:
+        - Before/after cleaning comparisons
+        - Pipeline monitoring and logging
+        - Quality assessment of graph structure
+        - Debugging unusual graph topologies
+    """
     if graph.number_of_nodes() == 0:
         return {"nodes": 0, "edges": 0, "terminals": 0, "branches": 0}
 
@@ -763,7 +1174,33 @@ def clean_graph(
     radius_ratio_threshold: float = 0.3,
     length_ratio_threshold: float = 1.5,
 ) -> nx.Graph:
-    """Clean graph with standardized pipeline and comprehensive error handling."""
+    """
+    Execute comprehensive graph cleaning pipeline with full error handling.
+
+    This is the main entry point for graph cleaning operations. It orchestrates
+    the complete cleaning pipeline while providing validation, error handling,
+    and progress monitoring.
+
+    Args:
+        graph: NetworkX graph to clean (not modified, copy returned)
+        radius_ratio_threshold: Minimum end/parent radius ratio for branch preservation
+                               Range: (0, 1), default 0.3
+        length_ratio_threshold: Length factor relative to parent diameter
+                               Range: > 0, default 1.5
+
+    Returns:
+        nx.Graph: Cleaned graph with artifacts removed and segments fused
+                  Returns copy/empty graph on error conditions
+
+    Pipeline Steps:
+        1. Input validation and parameter verification
+        2. Structure validation (required attributes)
+        3. Suspicious cycle edge removal
+        4. Artifact branch removal (with safety checks)
+        5. Linear segment fusion
+        6. Short terminal node removal
+        7. Isolated node cleanup
+    """
     # Enhanced input validation
     if graph is None:
         logger.error("None graph provided to clean_graph")
