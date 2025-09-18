@@ -14,3 +14,4 @@ test_unknown
 test_missing_voxels
 test_missing_lobes
 test_betti_check
+test_steps
