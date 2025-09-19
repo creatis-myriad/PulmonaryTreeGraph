@@ -1150,6 +1150,12 @@ def _add_segment_counts(graph: nx.DiGraph) -> dict[str, int]:
                     edge_data.get("name", "unnamed"),
                     segment_count,
                 )
+            else:
+                edge_data["segments_below"] = 0
+                logger.warning(
+                    "Edge (%s) has no downstream segment chains. This may indicate an issue either in the segmented vessel, or an anatomical reality.",
+                    edge_data.get("name", "unnamed"),
+                )
 
     # Convert sets to counts for reporting
     segment_counts_by_lobe = {
