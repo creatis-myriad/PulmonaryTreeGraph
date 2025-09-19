@@ -1,5 +1,12 @@
 """
-Simplified module for labeling pulmonary vascular tree graphs with anatomical information.
+Module for labeling pulmonary vascular tree graphs with anatomical information.
+
+This module provides functions to label the main pulmonary artery (MPA), right pulmonary artery (RPA),
+left pulmonary artery (LPA), laterality, and lobe information on a directed graph representation.
+It uses breadth-first search (BFS) to traverse the graph and assign labels based on spatial relationships
+with provided lung masks. The hierarchy of vessel levels is also established, with MPA as level 1, RPA and LPA as level 2,
+lobar vessels as level 3, segmental vessels as level 4, and subsequent branches assigned increasing levels.
+Vessels connecting multiple lobes are marked as interlobar.
 """
 
 import logging
@@ -10,13 +17,80 @@ import networkx as nx
 logger = logging.getLogger(__name__)
 
 
+# =============================================================================
+# BASIC UTILITIES
+# =============================================================================
+
+
 def _is_in_mask(pos: list[int], mask) -> bool:
-    """Check if position is in the mask."""
+    """
+    Check if a 3D position is within a binary mask.
+
+    Args:
+        pos: 3D coordinate [x, y, z] in voxel space
+        mask: Binary 3D array representing anatomical region
+
+    Returns:
+        bool: True if position is within mask (value == 1), False otherwise
+    """
     return mask[pos[0], pos[1], pos[2]] == 1
 
 
+def _normalize_lobe_to_list(lobe_data) -> list:
+    """
+    Convert lobe data to consistent list format for processing.
+
+    Args:
+        lobe_data: Lobe information in various formats (string, list, etc.)
+
+    Returns:
+        list: Normalized lobe data as list
+    """
+    if isinstance(lobe_data, list):
+        return lobe_data
+    else:
+        return [lobe_data]
+
+
+def _is_unknown_lobe(lobe_data) -> bool:
+    """
+    Check if lobe data represents unknown/unlabeled state.
+
+    Args:
+        lobe_data: Lobe information to check (list or string format)
+
+    Returns:
+        bool: True if lobe is unknown/unlabeled, False otherwise
+    """
+    if isinstance(lobe_data, list):
+        return len(lobe_data) == 0 or (
+            len(lobe_data) == 1 and lobe_data[0] == "unknown"
+        )
+    else:
+        return lobe_data == "unknown"
+
+
+# =============================================================================
+# ANATOMICAL CLASSIFICATION
+# =============================================================================
+
+
 def _determine_laterality(graph: nx.DiGraph, start_node: int, lungs: dict) -> str:
-    """Determine if a branch goes to right or left lung using BFS."""
+    """
+    Determine if a vessel branch goes to right or left lung using BFS traversal.
+
+    Args:
+        graph: Directed graph representing vascular tree
+        start_node: Starting node for laterality determination
+        lungs: Dictionary containing 'right' and 'left' lung masks
+
+    Returns:
+        str: 'right', 'left', or 'unknown' laterality
+
+    Algorithm:
+        Uses breadth-first search to traverse descendants until finding
+        a node within either lung mask, limiting search for performance.
+    """
     queue = deque([start_node])
     visited = set([start_node])
     nodes_checked = 0
@@ -40,120 +114,27 @@ def _determine_laterality(graph: nx.DiGraph, start_node: int, lungs: dict) -> st
     return "unknown"
 
 
-def _propagate_laterality(graph: nx.DiGraph, start_node: int, lateral: str) -> None:
-    """Propagate laterality to all descendants using BFS."""
-    queue = deque([start_node])
-    visited = set([start_node])
-
-    while queue:
-        node = queue.popleft()
-
-        for successor in graph.successors(node):
-            if "lateral" not in graph.edges[node, successor]:
-                graph.edges[node, successor]["lateral"] = lateral
-
-            if successor not in visited:
-                visited.add(successor)
-                queue.append(successor)
-
-
-def _label_main_artery(graph: nx.DiGraph) -> None:
-    """Label the main pulmonary artery (level 1)."""
-    root_node = 0
-    successors = list(graph.successors(root_node))
-    if not successors:
-        logger.warning("No successors found for root node")
-        return
-
-    first_bifurcation = successors[0]
-
-    graph.edges[root_node, first_bifurcation]["level"] = 1
-    graph.edges[root_node, first_bifurcation]["name"] = "MPA"
-    graph.edges[root_node, first_bifurcation]["lateral"] = "None"
-    graph.edges[root_node, first_bifurcation]["lobe"] = ["None"]
-
-    logger.info("Main pulmonary artery labeled")
-
-
-def _label_laterality_and_bifurcation(graph: nx.DiGraph, lungs: dict) -> None:
-    """Label laterality and first bifurcation (level 2)."""
-    # Find the first bifurcation node
-    mpa_edges = [(u, v) for u, v, d in graph.edges(data=True) if d.get("level") == 1]
-    if not mpa_edges:
-        logger.warning("No MPA edge found")
-        return
-
-    _, bifurcation_node = mpa_edges[0]
-
-    # Label RPA and LPA
-    for successor in graph.successors(bifurcation_node):
-        lateral = _determine_laterality(graph, successor, lungs)
-        vessel_name = "RPA" if lateral == "right" else "LPA"
-
-        graph.edges[bifurcation_node, successor]["level"] = 2
-        graph.edges[bifurcation_node, successor]["name"] = vessel_name
-        graph.edges[bifurcation_node, successor]["lateral"] = lateral
-        graph.edges[bifurcation_node, successor]["lobe"] = ["None"]
-
-        # Propagate laterality to all descendants
-        _propagate_laterality(graph, successor, lateral)
-
-    logger.info("Laterality and first bifurcation labeled")
-
-
-def _mark_interlobar_vessels(graph: nx.DiGraph) -> None:
-    """Mark vessels that connect multiple lobes as interlobar, but keep list format."""
-    edges_to_update = []
-
-    for u, v, data in graph.edges(data=True):
-        # Skip MPA, RPA, LPA - they keep their ["None"] format
-        if data.get("level") <= 2 and data.get("name") in ["MPA", "RPA", "LPA"]:
-            continue
-
-        current_lobe = _normalize_lobe_to_list(data.get("lobe", []))
-
-        # Update name based on lobe content, but keep lobe as list
-        if len(current_lobe) > 1:
-            # Multiple lobes - this is interlobar
-            lobe_str = "_".join(sorted(current_lobe))
-            edges_to_update.append(
-                (u, v, current_lobe, f"Interlobar_{lobe_str}_{u}_{v}")
-            )
-        elif len(current_lobe) == 1 and current_lobe[0] not in ["unknown", "None"]:
-            # Single lobe
-            lobe = current_lobe[0]
-            edges_to_update.append((u, v, current_lobe, f"{lobe}_{u}_{v}"))
-        else:
-            # Empty or unknown
-            edges_to_update.append((u, v, ["unknown"], f"Unknown_{u}_{v}"))
-
-    # Apply updates - keep as lists for now
-    for u, v, lobe_list, name in edges_to_update:
-        graph.edges[u, v]["lobe"] = lobe_list
-        graph.edges[u, v]["name"] = name
-
-    logger.info("Processed %d edges for interlobar marking", len(edges_to_update))
-
-
-def _label_remaining_as_level3(graph: nx.DiGraph) -> None:
-    """Label all remaining unlabeled vessels as level 3 (batch processing)."""
-    unlabeled_edges = []
-
-    for u, v, data in graph.edges(data=True):
-        if "level" not in data:
-            unlabeled_edges.append((u, v))
-
-    # Batch update
-    for u, v in unlabeled_edges:
-        graph.edges[u, v]["level"] = 3
-        graph.edges[u, v]["name"] = f"Level3_{u}_{v}"
-        graph.edges[u, v]["lobe"] = []
-
-    logger.info("Labeled %d remaining vessels as level 3", len(unlabeled_edges))
-
-
 def _get_endpoint_lobe(graph: nx.DiGraph, node: int, lobe_masks: dict) -> str:
-    """Determine which lobe an endpoint is in by checking both ends of the end branch."""
+    """
+    Determine which anatomical lobe contains a terminal vessel endpoint.
+
+    Foundation for anatomical labeling - endpoint classification
+    propagates up through vessel tree.
+
+    Args:
+        graph: Directed graph representing vascular tree
+        node: Terminal node to classify
+        lobe_masks: Dictionary of lobe name -> binary mask mappings
+
+    Returns:
+        str: Lobe name ('RUL', 'RML', 'RLL', 'LUL', 'LLL') or 'unknown'
+
+    Algorithm:
+        1. Check endpoint position directly in lobe masks
+        2. If not found, check beginning of terminal branch
+        3. Use priority order for common lobes
+
+    """
     # Check most common lobes first for better average performance
     priority_order = ["RUL", "LUL", "RLL", "LLL", "RML"]
 
@@ -185,8 +166,215 @@ def _get_endpoint_lobe(graph: nx.DiGraph, node: int, lobe_masks: dict) -> str:
     return "unknown"
 
 
+# =============================================================================
+# HIERARCHY ESTABLISHMENT
+# =============================================================================
+
+
+def _label_main_artery(graph: nx.DiGraph) -> None:
+    """
+    Sets first edge from root as level 1 with name 'MPA',
+    lateral='None', and lobe=['None'].
+    All other levels derive from this primary vessel classification.
+
+    Args:
+        graph: Directed graph to label (modified in-place)
+    """
+    root_node = 0
+    successors = list(graph.successors(root_node))
+    if not successors:
+        logger.warning("No successors found for root node")
+        return
+
+    first_bifurcation = successors[0]
+
+    graph.edges[root_node, first_bifurcation]["level"] = 1
+    graph.edges[root_node, first_bifurcation]["name"] = "MPA"
+    graph.edges[root_node, first_bifurcation]["lateral"] = "None"
+    graph.edges[root_node, first_bifurcation]["lobe"] = ["None"]
+
+    logger.info("Main pulmonary artery labeled")
+
+
+def _propagate_laterality(graph: nx.DiGraph, start_node: int, lateral: str) -> None:
+    """
+    Propagate laterality information to all descendant vessels using BFS traversal.
+
+    Critical for establishing consistent left/right classification
+    throughout vessel tree after RPA/LPA identification. Ensures
+    all downstream vessels inherit proper laterality from their
+    primary branch (RPA or LPA).
+
+    Args:
+        graph: Directed graph to label (modified in-place)
+        start_node: Node to begin laterality propagation from
+        lateral: Laterality value ('right' or 'left') to propagate
+
+    Algorithm:
+        Uses breadth-first search to traverse all descendants and assign
+        laterality to edges that don't already have this attribute set.
+
+    """
+    queue = deque([start_node])
+    visited = set([start_node])
+
+    while queue:
+        node = queue.popleft()
+
+        for successor in graph.successors(node):
+            if "lateral" not in graph.edges[node, successor]:
+                graph.edges[node, successor]["lateral"] = lateral
+
+            if successor not in visited:
+                visited.add(successor)
+                queue.append(successor)
+
+
+def _label_laterality_and_bifurcation(graph: nx.DiGraph, lungs: dict) -> None:
+    """
+    Label right and left pulmonary arteries (RPA/LPA) as level 2 vessels.
+
+    Args:
+        graph: Directed graph to label (modified in-place)
+        lungs: Dictionary containing right and left lung masks
+
+    Algorithm:
+        1. Find MPA termination (first bifurcation node)
+        2. For each branch, determine laterality using lung masks
+        3. Label as RPA or LPA with level 2
+        4. Propagate laterality to all descendants using _propagate_laterality
+    """
+    # Find the first bifurcation node
+    mpa_edges = [(u, v) for u, v, d in graph.edges(data=True) if d.get("level") == 1]
+    if not mpa_edges:
+        logger.warning("No MPA edge found")
+        return
+
+    _, bifurcation_node = mpa_edges[0]
+
+    # Label RPA and LPA
+    for successor in graph.successors(bifurcation_node):
+        lateral = _determine_laterality(graph, successor, lungs)
+        vessel_name = "RPA" if lateral == "right" else "LPA"
+
+        graph.edges[bifurcation_node, successor]["level"] = 2
+        graph.edges[bifurcation_node, successor]["name"] = vessel_name
+        graph.edges[bifurcation_node, successor]["lateral"] = lateral
+        graph.edges[bifurcation_node, successor]["lobe"] = ["None"]
+
+        # Propagate laterality to all descendants
+        _propagate_laterality(graph, successor, lateral)
+
+    logger.info("Laterality and first bifurcation labeled")
+
+
+def _label_remaining_as_level3(graph: nx.DiGraph) -> None:
+    """
+    Label all unlabeled vessels as level 3 in batch operation.
+    Level 3 represents initial classification before hierarchical rules.
+
+    Args:
+        graph: Directed graph to label (modified in-place)
+    """
+    unlabeled_edges = []
+
+    for u, v, data in graph.edges(data=True):
+        if "level" not in data:
+            unlabeled_edges.append((u, v))
+
+    # Batch update
+    for u, v in unlabeled_edges:
+        graph.edges[u, v]["level"] = 3
+        graph.edges[u, v]["name"] = f"Level3_{u}_{v}"
+        graph.edges[u, v]["lobe"] = []
+
+    logger.info("Labeled %d remaining vessels as level 3", len(unlabeled_edges))
+
+
+# =============================================================================
+# LOBE CLASSIFICATION
+# =============================================================================
+
+
+def _trace_back_and_label(graph: nx.DiGraph, start_node: int, lobe: str) -> None:
+    """
+    Trace from endpoint back to level 2, adding lobe information to vessel path.
+
+    Args:
+        graph: Directed graph to label (modified in-place)
+        start_node: Terminal node to trace backward from
+        lobe: Lobe name to propagate along the path
+
+    Algorithm:
+        1. Start at terminal node and follow predecessors
+        2. Add lobe to edge lobe list (maintaining list format)
+        3. Stop when reaching level 2 (RPA/LPA) or root
+        4. Skip edges already containing the lobe
+
+    Note:
+        Core mechanism for propagating anatomical information from
+        endpoints through vessel tree to establish lobe territories.
+    """
+    current = start_node
+    visited = set()
+
+    while current is not None and current not in visited:
+        visited.add(current)
+
+        # Get predecessors (should be exactly one in a tree, except for root)
+        predecessors = list(graph.predecessors(current))
+        if not predecessors:
+            break  # Reached root
+
+        parent = predecessors[0]
+
+        # Get edge data
+        if graph.has_edge(parent, current):
+            edge_data = graph.edges[parent, current]
+            current_level = edge_data.get("level", 1)
+
+            # Only add lobe to edges at level 3 and above (not level 1 MPA or level 2 RPA/LPA)
+            if current_level > 2:
+                # Initialize lobe list if it doesn't exist or is not a list
+                current_lobe = edge_data.get("lobe", "unknown")
+                if not isinstance(current_lobe, list):
+                    if current_lobe in ["unknown", "None"]:
+                        edge_data["lobe"] = []
+                    else:
+                        edge_data["lobe"] = [current_lobe]
+
+                # Add the lobe if it's not already present
+                if lobe not in edge_data["lobe"]:
+                    edge_data["lobe"].append(lobe)
+                    logger.debug(
+                        f"Added lobe {lobe} to edge {parent}->{current} (level {current_level})"
+                    )
+
+            # Stop if we reach level 2
+            if current_level <= 2:
+                break
+
+        current = parent
+
+
 def _find_sibling_lobe(graph: nx.DiGraph, u: int, v: int) -> tuple[str, list[str]]:
-    """Find lobe from siblings and parent of the same level. Returns (lobe_label, all_lobes_list)."""
+    """
+    Determine vessel lobe by analyzing parent and sibling vessel information.
+
+    Args:
+        graph: Directed graph with partial lobe labeling
+        u: Source node of edge to classify
+        v: Target node of edge to classify
+
+    Returns:
+        tuple: (primary_lobe_label, all_contributing_lobes_list)
+
+    Algorithm:
+        1. Get parent edge lobe information
+        2. Collect sibling edge lobe data at same level
+        3. Handle interlobar vs single-lobe consensus
+        4. Return primary classification and contributing lobe list
+    """
     # Get the parent of edge u->v
     parents = list(graph.predecessors(u))
     if not parents:
@@ -273,115 +461,30 @@ def _find_sibling_lobe(graph: nx.DiGraph, u: int, v: int) -> tuple[str, list[str
         return "interlobar", unique_lobes
 
 
-def _label_unknown_vessels_with_sibling(graph: nx.DiGraph) -> int:
-    """Label unknown vessels using sibling vessel and parent information."""
-    logger.debug("Starting sibling-based labeling for unknown vessels")
-
-    # Get all edges with unknown lobe
-    unknown_edges = [
-        (u, v, data)
-        for u, v, data in graph.edges(data=True)
-        if _is_unknown_lobe(data.get("lobe", []))
-    ]
-
-    logger.info(
-        f"Found {len(unknown_edges)} unknown edges to process with sibling labeling"
-    )
-
-    actually_labeled_count = 0
-    for u, v, edge_data in unknown_edges:
-        current_lobe = edge_data.get("lobe", [])
-        if _is_unknown_lobe(current_lobe):
-            logger.debug(f"Processing edge {u}->{v}")
-
-            sibling_lobe_label, all_lobes_list = _find_sibling_lobe(graph, u, v)
-
-            logger.debug(
-                f"  _find_sibling_lobe returned: lobe_label='{sibling_lobe_label}', all_lobes={all_lobes_list}"
-            )
-
-            if sibling_lobe_label != "unknown" and all_lobes_list:
-                # Set the lobe field as a list containing all lobes
-                edge_data["lobe"] = all_lobes_list.copy()
-
-                logger.info(
-                    f"Assigning lobe {sibling_lobe_label} to edge {u}->{v} based on sibling/parent info"
-                )
-                logger.debug(f"Edge {u}->{v} now has lobe={all_lobes_list}")
-                actually_labeled_count += 1
-            else:
-                logger.debug(f"Could not find sibling/parent lobe for edge {u}->{v}")
-
-    logger.info(
-        f"Labeled {actually_labeled_count} unknown vessels using sibling/parent information"
-    )
-    return actually_labeled_count
-
-
-def _trace_back_and_label(graph: nx.DiGraph, start_node: int, lobe: str) -> None:
-    """Trace back from endpoint all the way to level 2 (RPA/LPA), adding lobe to lobe list."""
-    current = start_node
-    visited = set()
-
-    while current is not None and current not in visited:
-        visited.add(current)
-
-        # Get predecessors (should be exactly one in a tree, except for root)
-        predecessors = list(graph.predecessors(current))
-        if not predecessors:
-            break  # Reached root
-
-        parent = predecessors[0]
-
-        # Get edge data
-        if graph.has_edge(parent, current):
-            edge_data = graph.edges[parent, current]
-            current_level = edge_data.get("level", 1)
-
-            # Only add lobe to edges at level 3 and above (not level 1 MPA or level 2 RPA/LPA)
-            if current_level > 2:
-                # Initialize lobe list if it doesn't exist or is not a list
-                current_lobe = edge_data.get("lobe", "unknown")
-                if not isinstance(current_lobe, list):
-                    if current_lobe in ["unknown", "None"]:
-                        edge_data["lobe"] = []
-                    else:
-                        edge_data["lobe"] = [current_lobe]
-
-                # Add the lobe if it's not already present
-                if lobe not in edge_data["lobe"]:
-                    edge_data["lobe"].append(lobe)
-                    logger.debug(
-                        f"Added lobe {lobe} to edge {parent}->{current} (level {current_level})"
-                    )
-
-            # Stop if we reach level 2
-            if current_level <= 2:
-                break
-
-        current = parent
-
-
-def _is_unknown_lobe(lobe_data) -> bool:
-    """Check if lobe data represents unknown/unlabeled state."""
-    if isinstance(lobe_data, list):
-        return len(lobe_data) == 0 or (
-            len(lobe_data) == 1 and lobe_data[0] == "unknown"
-        )
-    else:
-        return lobe_data == "unknown"
-
-
-def _normalize_lobe_to_list(lobe_data) -> list:
-    """Convert lobe data to consistent list format."""
-    if isinstance(lobe_data, list):
-        return lobe_data
-    else:
-        return [lobe_data]
-
-
 def _label_lobes_from_endpoints(graph: nx.DiGraph, lobe_masks: dict) -> None:
-    """Label lobes by tracing from endpoints back to level 2 (optimized with sibling/ancestor propagation)."""
+    """
+    Primary lobe labeling using endpoint classification and iterative propagation.
+
+    Args:
+        graph: Directed graph to label (modified in-place)
+        lobe_masks: Dictionary mapping lobe names to binary masks
+
+    Algorithm:
+        1. Find all terminal nodes (endpoints)
+        2. Classify each endpoint using lobe masks
+        3. Trace back from classified endpoints
+        4. Apply iterative sibling-based labeling for remaining unknowns
+        5. Continue until convergence or maximum iterations
+
+    Quality Control:
+        - Tracks labeling progress through iterations
+        - Logs remaining unknown vessels for debugging
+        - Implements convergence detection to avoid infinite loops
+
+    Note:
+        Main orchestration function for anatomical lobe assignment.
+        Combines direct mask classification with inference algorithms.
+    """
     # Find all endpoints efficiently
     endpoints = [node for node in graph.nodes() if graph.out_degree(node) == 0]
 
@@ -464,10 +567,169 @@ def _label_lobes_from_endpoints(graph: nx.DiGraph, lobe_masks: dict) -> None:
                 break
 
 
+def _label_unknown_vessels_with_sibling(graph: nx.DiGraph) -> int:
+    """
+    Label vessels with unknown lobes using sibling and parent vessel information.
+    Designed for iterative application - each pass may enable
+    classification of additional vessels as more context becomes available.
+
+    Args:
+        graph: Directed graph with partial lobe labeling (modified in-place)
+
+    Returns:
+        int: Number of vessels successfully labeled in this iteration
+
+    Algorithm:
+        1. Identify all vessels with unknown/empty lobe classification
+        2. For each unknown vessel, analyze parent and sibling lobe data
+        3. Apply consensus rules for single vs multiple lobe territories
+        4. Update vessel lobe information based on inference
+
+
+    """
+    logger.debug("Starting sibling-based labeling for unknown vessels")
+
+    # Get all edges with unknown lobe
+    unknown_edges = [
+        (u, v, data)
+        for u, v, data in graph.edges(data=True)
+        if _is_unknown_lobe(data.get("lobe", []))
+    ]
+
+    logger.info(
+        f"Found {len(unknown_edges)} unknown edges to process with sibling labeling"
+    )
+
+    actually_labeled_count = 0
+    for u, v, edge_data in unknown_edges:
+        current_lobe = edge_data.get("lobe", [])
+        if _is_unknown_lobe(current_lobe):
+            logger.debug(f"Processing edge {u}->{v}")
+
+            sibling_lobe_label, all_lobes_list = _find_sibling_lobe(graph, u, v)
+
+            logger.debug(
+                f"  _find_sibling_lobe returned: lobe_label='{sibling_lobe_label}', all_lobes={all_lobes_list}"
+            )
+
+            if sibling_lobe_label != "unknown" and all_lobes_list:
+                # Set the lobe field as a list containing all lobes
+                edge_data["lobe"] = all_lobes_list.copy()
+
+                logger.info(
+                    f"Assigning lobe {sibling_lobe_label} to edge {u}->{v} based on sibling/parent info"
+                )
+                logger.debug(f"Edge {u}->{v} now has lobe={all_lobes_list}")
+                actually_labeled_count += 1
+            else:
+                logger.debug(f"Could not find sibling/parent lobe for edge {u}->{v}")
+
+    logger.info(
+        f"Labeled {actually_labeled_count} unknown vessels using sibling/parent information"
+    )
+    return actually_labeled_count
+
+
+def _mark_interlobar_vessels(graph: nx.DiGraph) -> None:
+    """
+    Identify and mark vessels that serve multiple anatomical lobes.
+    Sets name patterns like "Interlobar_RUL_RML_u_v" for multi-lobe vessels
+    and "RUL_u_v" for single-lobe vessels.
+
+    Args:
+        graph: Directed graph with lobe classifications (modified in-place)
+
+    Algorithm:
+        1. Examine lobe list for each vessel
+        2. Vessels with multiple lobes marked as interlobar
+        3. Update vessel names to reflect interlobar status
+        4. Maintain list format for consistency
+    """
+    edges_to_update = []
+
+    for u, v, data in graph.edges(data=True):
+        # Skip MPA, RPA, LPA - they keep their ["None"] format
+        if data.get("level") <= 2 and data.get("name") in ["MPA", "RPA", "LPA"]:
+            continue
+
+        current_lobe = _normalize_lobe_to_list(data.get("lobe", []))
+
+        # Update name based on lobe content, but keep lobe as list
+        if len(current_lobe) > 1:
+            # Multiple lobes - this is interlobar
+            lobe_str = "_".join(sorted(current_lobe))
+            edges_to_update.append(
+                (u, v, current_lobe, f"Interlobar_{lobe_str}_{u}_{v}")
+            )
+        elif len(current_lobe) == 1 and current_lobe[0] not in ["unknown", "None"]:
+            # Single lobe
+            lobe = current_lobe[0]
+            edges_to_update.append((u, v, current_lobe, f"{lobe}_{u}_{v}"))
+        else:
+            # Empty or unknown
+            edges_to_update.append((u, v, ["unknown"], f"Unknown_{u}_{v}"))
+
+    # Apply updates - keep as lists for now
+    for u, v, lobe_list, name in edges_to_update:
+        graph.edges[u, v]["lobe"] = lobe_list
+        graph.edges[u, v]["name"] = name
+
+    logger.info("Processed %d edges for interlobar marking", len(edges_to_update))
+
+
+def _convert_lobes_to_strings(graph: nx.DiGraph) -> None:
+    """
+    Convert lobe data from list format to final string format.
+
+    Args:
+        graph: Directed graph with list-format lobe data (modified in-place)
+
+    Conversion Rules:
+        - Multiple lobes → "interlobar"
+        - Single lobe → lobe name string
+        - Empty list → "unknown"
+        - Already strings → unchanged
+    """
+    for _, _, data in graph.edges(data=True):
+        lobe = data.get("lobe", [])
+
+        if isinstance(lobe, list):
+            if len(lobe) > 1:
+                # Multiple lobes - mark as interlobar
+                data["lobe"] = "interlobar"
+            elif len(lobe) == 1:
+                # Single lobe
+                data["lobe"] = lobe[0]
+            else:
+                # Empty list - mark as unknown
+                data["lobe"] = "unknown"
+        # If already string, leave as is
+
+    logger.info("Converted lobe data from lists to strings")
+
+
+# =============================================================================
+# HIERARCHICAL CLASSIFICATION
+# =============================================================================
+
+
 def _create_hierarchical_levels(
     graph: nx.DiGraph, diameter_threshold: float = 0.7, length_threshold: float = 2
 ) -> None:
-    """Apply bifurcation rules iteratively instead of recursively."""
+    """
+    Apply iterative bifurcation rules to establish vessel hierarchy beyond level 2.
+
+    Args:
+        graph: Directed graph with basic level classification (modified in-place)
+        diameter_threshold: Minimum diameter ratio for trunk vessel classification
+        length_threshold: Maximum length/diameter ratio for trunk vessels
+
+    Algorithm:
+        1. Start from level 2 vessels (RPA/LPA)
+        2. Use breadth-first traversal to process descendants
+        3. Apply vessel classification rules at each bifurcation
+        4. Assign appropriate hierarchy levels based on morphology
+    """
 
     # Find all level 2 edges to start from
     level2_edges = [
@@ -522,7 +784,26 @@ def _apply_vessel_rules(
     diameter_threshold: float,
     length_threshold: float,
 ) -> int:
-    """Apply vessel classification rules and return the new level."""
+    """
+    Apply morphological classification rules to determine vessel hierarchy level.
+
+    Args:
+        graph: Directed graph being classified (modified in-place)
+        parent_node: Source node of vessel being classified
+        current_node: Target node of vessel being classified
+        parent_level: Hierarchy level of parent vessel
+        parent_diameter: Diameter of parent vessel for ratio calculations
+        diameter_threshold: Minimum diameter ratio for trunk classification
+        length_threshold: Maximum length/diameter ratio for trunk vessels
+
+    Returns:
+        int: New hierarchy level assigned to vessel
+
+    Classification Logic:
+        1. Level 3 interlobar vessels remain level 3
+        2. Level 3 with level 2 parents: trunk vs level 4 based on criteria
+        3. Higher levels: trunk (maintain level) vs branch (increment level)
+    """
     edge_data = graph.edges[parent_node, current_node]
     current_level = edge_data.get("level", 3)
 
@@ -611,12 +892,24 @@ def _is_trunk_vessel(
     parent_level: int = None,
 ) -> bool:
     """
-    Determine if a vessel is a trunk vessel using hierarchical and lobe-specific rules.
+    Determine if vessel qualifies as trunk vessel using morphological criteria.
+
+    Args:
+        vessel_diameter: Diameter of vessel being classified
+        vessel_length: Length of vessel being classified
+        parent_diameter: Diameter of parent vessel
+        vessel_lobe: Anatomical lobe served by vessel
+        diameter_threshold: Minimum diameter ratio threshold
+        length_threshold: Maximum length/diameter ratio threshold
+        parent_level: Hierarchy level of parent vessel
+
+    Returns:
+        bool: True if vessel qualifies as trunk, False for branch classification
 
     Priority Rules:
-    1. Parent level ≤ 2: DIAMETER ONLY (early branching near main vessels)
-    2. Lower lobes (RLL/LLL): DIAMETER ONLY (main trunk accommodation)
-    3. All others: DIAMETER AND LENGTH (standard branching pattern)
+        1. Parent level ≤ 2: Diameter-only criteria (early branching)
+        2. Lower lobes (RLL/LLL): Diameter-only criteria (accommodation)
+        3. Upper lobes: Combined diameter AND length criteria
     """
     if parent_diameter == 0:
         return False
@@ -694,6 +987,11 @@ def _is_trunk_vessel_simple_rule(
     return is_trunk_diameter
 
 
+# =============================================================================
+# SEGMENTAL ANALYSIS
+# =============================================================================
+
+
 def _count_segments_by_linear_chains(
     graph: nx.DiGraph,
     current_node: int,
@@ -702,15 +1000,25 @@ def _count_segments_by_linear_chains(
     visited_nodes: set = None,
 ) -> None:
     """
-    Count segments by identifying linear chains rather than individual level 4 edges.
-    Only counts one segment per linear chain of level 4+ vessels.
+    Count vascular segments as linear chains rather than individual edges.
 
-    Parameters:
-    - graph: NetworkX directed graph
-    - current_node: Node to start traversal from
-    - segments_found: Set to collect unique segment chain start nodes
-    - segment_to_lobe: Dictionary to map segment nodes to their lobes
-    - visited_nodes: Set to track visited nodes to avoid cycles
+    Args:
+        graph: Directed graph representing vascular tree
+        current_node: Node to start traversal from
+        segments_found: Set collecting unique segment chain identifiers
+        segment_to_lobe: Dictionary mapping segment chains to anatomical lobes
+        visited_nodes: Set tracking visited nodes to prevent double-counting
+
+    Algorithm:
+        1. Traverse tree looking for level 4+ vessel chains
+        2. Identify linear sequences of connected segment-level vessels
+        3. Count each chain once using chain start node as identifier
+        4. Map each chain to its primary anatomical lobe
+
+    Chain Definition:
+        Linear sequence of level 4+ vessels with single predecessor/successor
+        relationships, representing functional vascular segments.
+
     """
     if visited_nodes is None:
         visited_nodes = set()
@@ -760,9 +1068,18 @@ def _count_segments_by_linear_chains(
 
 def _find_segment_chain_end(graph: nx.DiGraph, start_node: int) -> int:
     """
-    Find the end of a linear segment chain (level 4+ vessels).
+    Locate the terminal node of a linear segment chain.
 
-    Returns the last node in the linear chain of level 4+ vessels.
+    Args:
+        graph: Directed graph with hierarchical levels
+        start_node: Beginning node of segment chain
+
+    Returns:
+        int: Final node in the linear chain of level 4+ vessels
+
+    Algorithm:
+        Follow single-successor path until reaching branching point,
+        terminal node, or level transition boundary.
     """
     current = start_node
 
@@ -791,7 +1108,13 @@ def _mark_chain_as_visited(
     graph: nx.DiGraph, start_node: int, end_node: int, visited_nodes: set
 ) -> None:
     """
-    Mark all nodes in a segment chain as visited to avoid double counting.
+    Mark all nodes in a segment chain as processed to prevent double-counting.
+
+    Args:
+        graph: Directed graph being analyzed
+        start_node: First node in segment chain
+        end_node: Last node in segment chain
+        visited_nodes: Set of nodes to mark as processed
     """
     current = start_node
     visited_nodes.add(current)
@@ -811,35 +1134,24 @@ def _mark_chain_as_visited(
         current = next_node
 
 
-def _convert_lobes_to_strings(graph: nx.DiGraph) -> None:
-    """Convert lobe lists to string format for final processing."""
-    for _, _, data in graph.edges(data=True):
-        lobe = data.get("lobe", [])
-
-        if isinstance(lobe, list):
-            if len(lobe) > 1:
-                # Multiple lobes - mark as interlobar
-                data["lobe"] = "interlobar"
-            elif len(lobe) == 1:
-                # Single lobe
-                data["lobe"] = lobe[0]
-            else:
-                # Empty list - mark as unknown
-                data["lobe"] = "unknown"
-        # If already string, leave as is
-
-    logger.info("Converted lobe data from lists to strings")
-
-
 def _add_segment_counts(graph: nx.DiGraph) -> dict[str, int]:
     """
-    Count segment chains downstream of each vessel and add as attribute.
-
+    Calculate and add segment counts to each vessel edge as metadata.
     This adds the 'segments_below' attribute to each edge with level 1-3,
-    representing the number of unique downstream segment chains (not individual level 4 edges).
+    representing the number of unique downstream segment chains (not
+    individual level 4 edges).
+
+    Args:
+        graph: Directed graph with hierarchical classification (modified in-place)
 
     Returns:
-    - Dictionary with segment counts by lobe
+        dict: Segment counts organized by anatomical lobe
+
+    Algorithm:
+        1. For each level 1-3 vessel, count downstream segment chains
+        2. Add 'segments_below' attribute to vessel edges
+        3. Verify count consistency across hierarchy levels
+        4. Generate summary statistics by anatomical region
     """
     logger.info("Counting downstream segment chains for each vessel")
 
@@ -930,8 +1242,98 @@ def _add_segment_counts(graph: nx.DiGraph) -> dict[str, int]:
     return segment_counts_by_lobe
 
 
+# =============================================================================
+# VALIDATION AND QUALITY CONTROL
+# =============================================================================
+
+
+def _check_lobe_masks(lobe_masks: dict) -> None:
+    """
+    Validate that anatomical lobe masks contain data and warn of issues.
+
+    Args:
+        lobe_masks: Dictionary of lobe name -> binary mask mappings
+
+    Validation Checks:
+        - Detects None/empty masks
+        - Counts non-zero voxels in each mask
+        - Warns about missing anatomical regions
+    """
+    empty_masks = []
+
+    for lobe_name, mask in lobe_masks.items():
+        if mask is None:
+            empty_masks.append(lobe_name)
+            logger.warning("Lobe mask for %s is None", lobe_name)
+        elif hasattr(mask, "sum"):
+            # For numpy arrays or similar
+            if mask.sum() == 0:
+                empty_masks.append(lobe_name)
+                logger.warning("Lobe mask for %s is empty (no voxels set)", lobe_name)
+        elif hasattr(mask, "__len__"):
+            # For lists or other sequences
+            if len(mask) == 0:
+                empty_masks.append(lobe_name)
+                logger.warning("Lobe mask for %s has zero length", lobe_name)
+
+    if empty_masks:
+        logger.warning("Found %d empty lobe masks: %s", len(empty_masks), empty_masks)
+        logger.warning("This may cause incomplete lobe labeling")
+    else:
+        logger.info("All lobe masks contain data")
+
+
+def _check_for_missing_lobes(graph: nx.DiGraph) -> None:
+    """
+    Verify that all expected anatomical lobes are represented in labeled graph.
+
+    Args:
+        graph: Completely labeled directed graph
+
+    Expected Lobes:
+        RUL, RML, RLL, LUL, LLL (standard pulmonary anatomy)
+
+    Quality Assessment:
+        Warns if any expected lobe completely absent from vessel tree,
+        which may indicate segmentation issues or anatomical variants.
+    """
+    expected_lobes = {"RUL", "RML", "RLL", "LUL", "LLL"}
+    found_lobes = set()
+
+    # Collect all lobes found in the graph
+    for _, _, data in graph.edges(data=True):
+        lobe = data.get("lobe", "unknown")
+
+        # Handle both list and string formats
+        if isinstance(lobe, list):
+            for lobe_name in lobe:
+                if lobe_name in expected_lobes:
+                    found_lobes.add(lobe_name)
+        elif lobe in expected_lobes:
+            found_lobes.add(lobe)
+
+    missing_lobes = expected_lobes - found_lobes
+
+    if missing_lobes:
+        logger.warning("Missing lobes detected: %s", sorted(missing_lobes))
+    else:
+        logger.info("All expected lobes found in vessel tree: %s", sorted(found_lobes))
+
+
 def _print_level_summary(graph: nx.DiGraph) -> None:
-    """Print comprehensive summary of vessel levels, anatomical distribution, and segment chains."""
+    """
+    Generate summary statistics for labeled vascular tree.
+
+    Args:
+        graph: Completely labeled and analyzed directed graph
+
+    Statistics Generated:
+        - Vessel count by hierarchy level
+        - Vessel count by anatomical lobe
+        - Segment chain distribution
+        - Maximum hierarchy level reached
+        - Cross-validation of counting methods
+    """
     level_counts = defaultdict(int)
     lobe_counts = defaultdict(int)
 
@@ -1001,55 +1403,9 @@ def _print_level_summary(graph: nx.DiGraph) -> None:
     logger.info("=" * 50)
 
 
-def _check_lobe_masks(lobe_masks: dict) -> None:
-    """Check if lobe masks are empty and warn."""
-    empty_masks = []
-
-    for lobe_name, mask in lobe_masks.items():
-        if mask is None:
-            empty_masks.append(lobe_name)
-            logger.warning("Lobe mask for %s is None", lobe_name)
-        elif hasattr(mask, "sum"):
-            # For numpy arrays or similar
-            if mask.sum() == 0:
-                empty_masks.append(lobe_name)
-                logger.warning("Lobe mask for %s is empty (no voxels set)", lobe_name)
-        elif hasattr(mask, "__len__"):
-            # For lists or other sequences
-            if len(mask) == 0:
-                empty_masks.append(lobe_name)
-                logger.warning("Lobe mask for %s has zero length", lobe_name)
-
-    if empty_masks:
-        logger.warning("Found %d empty lobe masks: %s", len(empty_masks), empty_masks)
-        logger.warning("This may cause incomplete lobe labeling")
-    else:
-        logger.info("All lobe masks contain data")
-
-
-def _check_for_missing_lobes(graph: nx.DiGraph) -> None:
-    """Check if any expected lobes are missing from the labeled graph and warn."""
-    expected_lobes = {"RUL", "RML", "RLL", "LUL", "LLL"}
-    found_lobes = set()
-
-    # Collect all lobes found in the graph
-    for _, _, data in graph.edges(data=True):
-        lobe = data.get("lobe", "unknown")
-
-        # Handle both list and string formats
-        if isinstance(lobe, list):
-            for lobe_name in lobe:
-                if lobe_name in expected_lobes:
-                    found_lobes.add(lobe_name)
-        elif lobe in expected_lobes:
-            found_lobes.add(lobe)
-
-    missing_lobes = expected_lobes - found_lobes
-
-    if missing_lobes:
-        logger.warning("Missing lobes detected: %s", sorted(missing_lobes))
-    else:
-        logger.info("All expected lobes found in vessel tree: %s", sorted(found_lobes))
+# =============================================================================
+# MAIN ENTRY POINT
+# =============================================================================
 
 
 def label_graph(
@@ -1059,16 +1415,48 @@ def label_graph(
     length_threshold: float = 1.5,
 ) -> nx.DiGraph:
     """
-    Simplified function to label a pulmonary vascular tree graph.
+    Complete anatomical labeling pipeline for pulmonary vascular tree graphs.
 
-    Parameters:
-    - graph: Directed graph to label
-    - lungs_dict: Dictionary of lung masks
-    - diameter_threshold: Minimum diameter ratio for trunk vessels (default: 0.5)
-    - length_threshold: Maximum length/diameter ratio for trunk vessels (default: 1.5)
+    This is the main orchestration function that coordinates all labeling steps
+    to transform a basic directed tree into a comprehensive anatomical model
+    with hierarchy levels, lobe assignments, and segment classifications.
+
+    Args:
+        graph: Oriented directed graph representing vascular tree
+        lungs_dict: Dictionary containing all anatomical masks:
+                   - lung_right, lung_left: laterality classification
+                   - lung_upper_lobe_right, lung_middle_lobe_right, etc.: lobe masks
+        diameter_threshold: Minimum diameter ratio for trunk vessel classification
+        length_threshold: Maximum length/diameter ratio for trunk vessels
 
     Returns:
-    - Labeled graph
+        nx.DiGraph: Comprehensively labeled graph with:
+                   - level: Hierarchy classification (1=MPA, 2=RPA/LPA, 3+=branches)
+                   - lateral: Left/right laterality
+                   - lobe: Anatomical lobe assignment
+                   - name: Human-readable vessel identifier
+                   - segments_below: Count of downstream segment chains
+
+    Pipeline Steps:
+        1. Hierarchy Foundation: Label MPA (level 1) and RPA/LPA (level 2)
+        2. Basic Classification: Assign level 3 to remaining vessels
+        3. Anatomical Mapping: Classify vessels by anatomical lobe
+        4. Interlobar Detection: Identify vessels serving multiple lobes
+        5. Format Standardization: Convert to consistent string formats
+        6. Advanced Hierarchy: Apply morphological rules for levels 3+
+        7. Quality Control: Validate completeness and consistency
+        8. Statistical Analysis: Generate segment counts and summaries
+
+    Morphological Criteria:
+        - Trunk vessels: Large diameter relative to parent, short relative to diameter
+        - Branch vessels: Smaller diameter, longer relative to diameter
+        - Lobe-specific rules: Account for anatomical differences between regions
+
+    Quality Assurance:
+        - Pre-validation of input masks
+        - Iterative unknown vessel classification
+        - Post-validation of expected anatomical coverage
+        - Statistical reporting
     """
     logger.info("Starting anatomical labeling")
 
@@ -1116,112 +1504,3 @@ def label_graph(
 
     logger.info("Labeling complete")
     return graph
-
-
-def _get_lobe_max_diameter(graph: nx.DiGraph) -> dict[str, float]:
-    """Get the maximum diameter for each lobe to use for relative size calculations."""
-    lobe_max_diameter = {}
-
-    for _, _, edge_data in graph.edges(data=True):
-        lobe = edge_data.get("lobe", "unknown")
-
-        # Handle list format for lobe
-        if isinstance(lobe, list):
-            if len(lobe) == 1:
-                lobe_name = lobe[0]
-            else:
-                continue  # Skip interlobar or unknown vessels
-        else:
-            lobe_name = lobe
-
-        if lobe_name not in ["interlobar", "unknown", "None"]:
-            diameter = edge_data.get("mean_radius", 0) * 2
-            if diameter > 0:
-                lobe_max_diameter[lobe_name] = max(
-                    lobe_max_diameter.get(lobe_name, 0), diameter
-                )
-
-    return lobe_max_diameter
-
-
-def _label_segments(graph: nx.DiGraph) -> None:
-    """Label segments based on vessel properties."""
-    logger.info("Starting segmental labeling")
-
-    # Get maximum diameter for each lobe
-    lobe_max_diameter = _get_lobe_max_diameter(graph)
-    logger.debug("Maximum diameter by lobe: %s", lobe_max_diameter)
-
-    segments_labeled = 0
-
-    for node1, node2 in graph.edges:
-        edge_data = graph.edges[node1, node2]
-
-        # Only process level 3 vessels that are not interlobar
-        if edge_data.get("level") != 3 or edge_data.get("lobe") == "interlobar":
-            continue
-
-        # Get parent edge
-        parents = list(graph.predecessors(node1))
-        if not parents:
-            continue
-
-        parent_edge = (parents[0], node1)
-        parent_data = graph.edges[parent_edge]
-
-        # Calculate vessel properties
-        vessel_diameter = edge_data.get("mean_radius", 0) * 2
-        vessel_length = edge_data.get("length", 0)
-        parent_diameter = parent_data.get("mean_radius", 0) * 2
-        vessel_lobe = edge_data.get("lobe", "unknown")
-
-        # Skip if invalid data
-        if (
-            vessel_diameter == 0
-            or parent_diameter == 0
-            or vessel_lobe not in lobe_max_diameter
-        ):
-            continue
-
-        # Calculate ratios
-        length_diameter_ratio = vessel_length / vessel_diameter
-        parent_ratio = vessel_diameter / parent_diameter
-        lobe_ratio = vessel_diameter / lobe_max_diameter[vessel_lobe]
-
-        # Apply lobe-specific segmentation criteria
-        parent_level = parent_data.get("level", 3)
-        if parent_level >= 4:
-            # Handle vessels with high-level parents
-            if length_diameter_ratio >= 2:
-                edge_data["level"] = parent_level + 1
-            else:
-                edge_data["level"] = parent_level
-            edge_data["name"] = f"{vessel_lobe} {edge_data['level']} {node1} {node2}"
-        else:
-            is_segment = False
-
-            if vessel_lobe in ["RUL", "LUL"]:
-                # Upper lobes have more permissive criteria
-                is_segment = length_diameter_ratio > 1 and (
-                    parent_ratio < 0.7 or lobe_ratio < 0.7
-                )
-            elif vessel_lobe in ["RML"]:
-                # Middle lobe has intermediate criteria
-                is_segment = length_diameter_ratio > 1 and (
-                    parent_ratio < 0.7 or lobe_ratio < 0.7
-                )
-            else:
-                # Lower lobes (RLL, LLL) have stricter criteria
-                is_segment = length_diameter_ratio > 1 and (
-                    parent_ratio < 0.7 or lobe_ratio < 0.7
-                )
-
-            if is_segment:
-                edge_data["level"] = 4
-                edge_data["name"] = f"{vessel_lobe} Segment {node1} {node2}"
-                logger.debug(
-                    "Labeled as segment in %s: %s-%s", vessel_lobe, node1, node2
-                )
-                segments_labeled += 1
-
-    logger.info("Labeled %d segments in total", segments_labeled)
