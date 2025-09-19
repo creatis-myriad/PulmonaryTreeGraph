@@ -6,7 +6,6 @@ experiments
 .snakemake
 .ruff_cache
 __pycache__
-tests
 test_fix
 workflows
 jean_zay/*
