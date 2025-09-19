@@ -79,14 +79,13 @@ def generate_patient_report(
         f.write("PIPELINE STEPS:\n")
         f.write("-" * 30 + "\n")
 
+        # Updated step names to match actual pipeline results
         step_names = {
             "preprocessing": "Preprocessing",
-            "skeleton": "Skeleton Generation",
-            "distance_map": "Distance Map Generation",
-            "built_graph": "Graph Construction",
-            "cleaned_graph": "Graph Cleaning",
-            "oriented_graph": "Graph Orientation",
-            "labeled_graph": "Graph Labeling",
+            "graph_building": "Graph Construction",
+            "graph_cleaning": "Graph Cleaning",
+            "graph_orienting": "Graph Orientation",
+            "graph_labeling": "Graph Labeling",
             "embolism_analysis": "Embolism Analysis",
         }
 
@@ -94,23 +93,51 @@ def generate_patient_report(
             if step_key in results and results[step_key] is not None:
                 f.write(f"  ✓ {step_name}\n")
 
-                # Add specific details based on result type
-                result = results[step_key]
-                if hasattr(result, "number_of_nodes"):  # NetworkX graph
-                    f.write(f"    - Nodes: {result.number_of_nodes()}\n")
-                    f.write(f"    - Edges: {result.number_of_edges()}\n")
-                elif isinstance(result, dict):  # Dictionary result
-                    if "num_embolisms" in result:
+                # Add specific details based on step content
+                step_data = results[step_key]
+                if isinstance(step_data, dict):
+                    if step_key == "preprocessing":
+                        # Show preprocessing outputs
+                        if "skeleton" in step_data:
+                            f.write("    - Skeleton generated\n")
+                        if "distance_map" in step_data:
+                            f.write("    - Distance map generated\n")
+
+                    elif step_key in [
+                        "graph_building",
+                        "graph_cleaning",
+                        "graph_orienting",
+                        "graph_labeling",
+                    ]:
+                        # Show graph statistics if available
+                        if "graph" in step_data:
+                            graph = step_data["graph"]
+                            if hasattr(graph, "number_of_nodes"):
+                                f.write(f"    - Nodes: {graph.number_of_nodes()}\n")
+                                f.write(f"    - Edges: {graph.number_of_edges()}\n")
+
+                        # Show specific step details
+                        step_details = {
+                            "graph_building": "Graph constructed from skeleton",
+                            "graph_cleaning": "Suspicious branches and cycles removed",
+                            "graph_orienting": "Graph oriented with proper tree structure",
+                            "graph_labeling": "Anatomical labels and hierarchy assigned",
+                        }
                         f.write(
-                            f"    - Embolisms detected: {result.get('num_embolisms', 0)}\n"
+                            f"    - {step_details.get(step_key, 'Step completed')}\n"
                         )
-                        f.write(
-                            f"    - Total embolic volume: {result.get('total_volume_mm3', 0):.2f} mm³\n"
-                        )
-                elif hasattr(result, "shape"):  # Numpy array
-                    f.write(f"    - Array shape: {result.shape}\n")
-                else:
-                    f.write(f"    - Result type: {type(result)}\n")
+
+                    elif step_key == "embolism_analysis":
+                        # Show embolism analysis results
+                        if "num_embolisms" in step_data:
+                            f.write(
+                                f"    - Embolisms detected: {step_data['num_embolisms']}\n"
+                            )
+                        if "total_volume_mm3" in step_data:
+                            f.write(
+                                f"    - Total embolic volume: {step_data['total_volume_mm3']:.2f} mm³\n"
+                            )
+
             else:
                 f.write(f"  - {step_name} (skipped or not completed)\n")
 
