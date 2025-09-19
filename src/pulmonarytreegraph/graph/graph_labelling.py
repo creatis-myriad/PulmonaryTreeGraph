@@ -918,33 +918,16 @@ def _is_trunk_vessel(
         return False
 
     diameter_ratio = vessel_diameter / parent_diameter
-    # is_trunk_diameter = diameter_ratio >= diameter_threshold
     length_ratio = vessel_length / vessel_diameter
-    # is_trunk_length = length_ratio <= length_threshold
 
-    # Priority Rule 1: Early hierarchy - use only diameter
-    # if parent_level is not None and parent_level <= 2:
-    #    is_trunk_diameter = (
-    #        diameter_ratio >= 0.5
-    #    )  # Adjusted threshold for early hierarchy
-    #    logger.debug(
-    #        "Early hierarchy vessel: %s, diameter ratio: %s, trunk: %s",
-    #        vessel_lobe,
-    #        diameter_ratio,
-    #        is_trunk_diameter,
-    #    )
-    #    return is_trunk_diameter
-
-    # fixed threshold for upper lobes
+    #  Fixed threshold for upper lobes
     if vessel_lobe in ["RUL", "LUL", "RML"]:
+        # after initial bifurcation from level 2, use stricter criteria
         if parent_level is not None and parent_level <= 2:
             is_trunk_diameter = diameter_ratio >= 0.5
             is_trunk_length = length_ratio <= 2.5
             return is_trunk_diameter or is_trunk_length
-        # elif parent_level is not None and parent_level >= 3:
-        #    is_trunk_diameter = diameter_ratio >= 0.
-        #    is_trunk_length = length_ratio <= 1.5
-        #    return is_trunk_diameter or is_trunk_length
+        # for higher levels in upper lobes, use combined criteria
         elif parent_level is not None and parent_level >= 3:
             is_trunk_diameter = diameter_ratio >= 0.7
             is_trunk_length = length_ratio <= 2.5
@@ -955,36 +938,6 @@ def _is_trunk_vessel(
         is_trunk_diameter = diameter_ratio >= 0.5
         is_trunk_length = length_ratio <= 2.5
         return is_trunk_diameter and is_trunk_length
-
-
-def _is_trunk_vessel_simple_rule(
-    vessel_diameter: float,
-    vessel_length: float,
-    parent_diameter: float,
-    vessel_lobe: str,
-    diameter_threshold: float,
-    length_threshold: float,
-    parent_level: int = None,
-) -> bool:
-    """
-    Determine if a vessel is a trunk vessel using hierarchical and lobe-specific rules.
-
-
-    """
-    if parent_diameter == 0:
-        return False
-
-    if vessel_diameter == 0:
-        return False
-
-    diameter_ratio = vessel_diameter / parent_diameter
-    is_trunk_diameter = diameter_ratio >= diameter_threshold
-
-    logger.debug(
-        "Applying standard rule: diameter=%s",
-        is_trunk_diameter,
-    )
-    return is_trunk_diameter
 
 
 # =============================================================================
