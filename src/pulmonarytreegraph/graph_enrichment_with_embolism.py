@@ -1,3 +1,16 @@
+"""
+Graph Enrichment with Embolism Module
+
+This module provides functions for integrating embolism data into vessel graphs
+and computing transversal obstruction metrics. It implements algorithms for
+annotating graph edges with embolism information, volumetric calculations,
+and cross-sectional obstruction analysis using Curve Planar Reformation (CPR).
+
+Main Functions:
+- integrate_embolism_into_graph(): Main entry point for embolism-graph integration
+- full_graph_transversal_obstructions(): Complete pipeline for transversal obstruction analysis
+"""
+
 import logging
 import math
 from collections import defaultdict
@@ -15,11 +28,29 @@ from pulmonarytreegraph.utils.metrics import (
 logger = logging.getLogger(__name__)
 
 
+# =============================================================================
+# VESSEL VOLUME AND VOXEL UTILITIES
+# =============================================================================
+
+
 def compute_edge_voxel_counts(
     vessel_mask: np.ndarray, graph: nx.Graph, spacing: tuple[float, float, float]
 ):
     """
-    Annotate each edge with the total number of voxels (from vessel_mask) for that edge's vessel_id.
+    Annotate each edge with total voxel counts and volumes from vessel_mask.
+
+    Args:
+        vessel_mask: 3D array with vessel IDs as values
+        graph: NetworkX graph with vessel edges
+        spacing: Voxel spacing (x, y, z) in millimeters
+
+    Returns:
+        None: Modifies graph in-place with vessel volume annotations
+
+    Algorithm:
+        1. Count voxels for each vessel ID from mask
+        2. Calculate volumes in mm³ and cm³ using spacing
+        3. Initialize embolism flags for all edges
     """
 
     for _, _, data in graph.edges(data=True):
@@ -42,6 +73,11 @@ def compute_edge_voxel_counts(
             data["total_vessel_volume_cm3"] = 0
 
 
+# =============================================================================
+# EMBOLISM-GRAPH INTEGRATION UTILITIES
+# =============================================================================
+
+
 def enrich_graph_with_embolisms(
     graph: nx.Graph,
     vessel_mask: np.ndarray,
@@ -49,7 +85,22 @@ def enrich_graph_with_embolisms(
     spacing: tuple[float, float, float],
 ):
     """
-    For each embolism, find which edge(s) its voxels fall into and annotate edges with embolism info.
+    Annotate graph edges with embolism information and obstruction metrics.
+
+    Args:
+        graph: NetworkX graph with vessel structure
+        vessel_mask: 3D array mapping coordinates to vessel IDs
+        embolism_objects: List of embolism objects with coordinates and IDs
+        spacing: Voxel spacing for volume calculations
+
+    Returns:
+        None: Modifies graph in-place with embolism annotations
+
+    Algorithm:
+        1. Map vessel IDs to corresponding graph edges
+        2. For each embolism, count voxels in each intersected vessel
+        3. Annotate edges with embolism IDs, voxel counts, and volumes
+        4. Calculate total obstruction ratios per edge
     """
     vesselid_to_edges = defaultdict(list)
     for u, v, data in graph.edges(data=True):
@@ -109,99 +160,36 @@ def enrich_graph_with_embolisms(
         )
 
 
-def integrate_embolism_into_graph(
-    vessel_graph: nx.Graph,
-    vessel_mask: np.ndarray,
-    embolism_objects: list[dict],
-    spacing: tuple[float, float, float],
-) -> nx.Graph:
-    """
-    Integrate embolism data into the vessel graph by annotating edges with embolism information.
+# =============================================================================
+# TRANSVERSAL OBSTRUCTION ANALYSIS
+# =============================================================================
+
+
+def _remove_non_centerline_structures(cpr: np.ndarray) -> np.ndarray:
+    """Filters out structures apart from the centerline around which the CPR was computed.
 
     Args:
-        vessel_graph: NetworkX graph representing the vessel structure.
-        vessel_mask: 3D numpy array with vessel IDs as values.
-        embolism_objects: List of embolism objects with coordinates and IDs.
+        cpr: (N, X, Y) CPR image, where N is the number of cross-section of the structure of interest, and X, Y are the
+            dimensions of each cross-section.
 
     Returns:
-        Updated vessel graph with embolism annotations.
+        (N, X, Y) CPR image with only the centerline structure retained, and all other structures removed.
     """
-    if vessel_mask.size == 0:
-        raise ValueError("Vessel mask cannot be empty")
-
-    # Compute edge voxel counts
-    compute_edge_voxel_counts(vessel_mask, vessel_graph, spacing)
-
-    # Enrich graph with embolism data
-    enrich_graph_with_embolisms(vessel_graph, vessel_mask, embolism_objects, spacing)
-
-    return vessel_graph
-
-
-def full_graph_transversal_obstructions(
-    vessel_mask: np.ndarray,
-    obstruction_mask: np.ndarray,
-    vessel_graph: nx.Graph,
-    vessel_mask_by_segment: bool = False,
-    centerline_key: str = "centerline",
-    obstruction_key: str = "transversal_obstruction",
-    progress_bar: bool = False,
-    **transversal_obstruction_kwargs,
-) -> nx.Graph:
-    """Computes the transversal obstruction for vessels in a 3D image whose centerline are defined in a graph.
-
-    Args:
-        vessel_mask: (X, Y, Z) 3D segmentation of the vessels. Any non-zero voxel is considered part of the mask.
-        obstruction_mask: (X, Y, Z) 3D segmentation of the structures (e.g. thrombi) to consider as obstructions in the
-            vessels. Any non-zero voxel is considered part of the mask.
-        vessel_graph: NetworkX `Graph` containing the centerline points of the vessels to analyze.
-        vessel_mask_by_segment: If ``True``, the `vessel_mask` is assumed to assign a unique label to each vessel
-            segment, which should correspond to the segment's edge ID in the `vessel_graph`.
-            This segmentation format can help provide more accurate obstruction values at vessels' intersections.
-        centerline_key: Attribute in the `vessel_graph` edges that contains the centerline points of the vessels.
-        obstruction_key: Attribute in the `vessel_graph` edges where to store the computed transversal obstructions.
-        progress_bar: If ``True``, enables progress bars detailing the progress over vessels.
-        transversal_obstruction_kwargs: Keyword arguments to pass to `transversal_obstruction`.
-
-    Returns:
-        Copy of the input `vessel_graph` with the transversal obstruction values added as edge attributes.
-    """
-    vessel_graph = vessel_graph.copy()
-
-    edges = vessel_graph.edges(data=True)
-    if progress_bar:
-        edges = tqdm(
-            edges, desc="Computing transversal obstructions", unit="vessel segment"
-        )
-
-    for source_node, target_node, edge_data in edges:
-        centerline = np.array(edge_data[centerline_key]).T  # (N, 3) -> (3, N)
-
-        # If the vessel mask is labelled by segment, use the edge ID to extract only the segment of interest
-        vessel_or_segment_mask = vessel_mask
-        if vessel_mask_by_segment:
-            vessel_id = int(edge_data["id"])
-
-            if np.any(vessel_mask == vessel_id):
-                vessel_or_segment_mask = vessel_mask == vessel_id
-            else:
-                logger.warning(
-                    f"The vessel mask does not contain any voxels for the segment with ID: '{vessel_id}'. "
-                    f"Including all vessel labels in the vessel mask for this specific segment."
-                )
-
-        obstruction_values = transversal_obstruction(
-            vessel_or_segment_mask,
-            obstruction_mask,
-            centerline,
-            **transversal_obstruction_kwargs,
-        )
-        # Add the computed obstruction values as an edge attribute
-        vessel_graph.edges[source_node, target_node][
-            obstruction_key
-        ] = obstruction_values
-
-    return vessel_graph
+    # Create a 3D connectivity structure that ignores 3D connectivity between slices
+    intraslice_connectivity = np.stack(
+        [np.zeros((3, 3)), ndimage.generate_binary_structure(2, 1), np.zeros((3, 3))]
+    )
+    # Label connected components in each slice individually
+    labels, _ = ndimage.label(cpr, structure=intraslice_connectivity)
+    # Look at each slice's connectivity individually, since components that separate downstream might be connected
+    # near the root of the centerline, and thus 3D connectivity would not remove them
+    cpr_x_mid, cpr_y_mid = np.array(cpr.shape[1:]) // 2
+    centerline_labels = labels[
+        :, cpr_x_mid, cpr_y_mid
+    ]  # Labels of the components at the center of each CPR slice
+    return (
+        cpr * (centerline_labels == labels.T).T
+    )  # Ignore components disconnected from the center one
 
 
 def transversal_obstruction(
@@ -279,28 +267,121 @@ def transversal_obstruction(
     return obstruction_area / (vessel_area + obstruction_area)
 
 
-def _remove_non_centerline_structures(cpr: np.ndarray) -> np.ndarray:
-    """Filters out structures apart from the centerline around which the CPR was computed.
+def full_graph_transversal_obstructions(
+    vessel_mask: np.ndarray,
+    obstruction_mask: np.ndarray,
+    vessel_graph: nx.Graph,
+    vessel_mask_by_segment: bool = False,
+    centerline_key: str = "centerline",
+    obstruction_key: str = "transversal_obstruction",
+    progress_bar: bool = False,
+    **transversal_obstruction_kwargs,
+) -> nx.Graph:
+    """Computes the transversal obstruction for vessels in a 3D image whose centerline are defined in a graph.
 
     Args:
-        cpr: (N, X, Y) CPR image, where N is the number of cross-section of the structure of interest, and X, Y are the
-            dimensions of each cross-section.
+        vessel_mask: (X, Y, Z) 3D segmentation of the vessels. Any non-zero voxel is considered part of the mask.
+        obstruction_mask: (X, Y, Z) 3D segmentation of the structures (e.g. thrombi) to consider as obstructions in the
+            vessels. Any non-zero voxel is considered part of the mask.
+        vessel_graph: NetworkX `Graph` containing the centerline points of the vessels to analyze.
+        vessel_mask_by_segment: If ``True``, the `vessel_mask` is assumed to assign a unique label to each vessel
+            segment, which should correspond to the segment's edge ID in the `vessel_graph`.
+            This segmentation format can help provide more accurate obstruction values at vessels' intersections.
+        centerline_key: Attribute in the `vessel_graph` edges that contains the centerline points of the vessels.
+        obstruction_key: Attribute in the `vessel_graph` edges where to store the computed transversal obstructions.
+        progress_bar: If ``True``, enables progress bars detailing the progress over vessels.
+        transversal_obstruction_kwargs: Keyword arguments to pass to `transversal_obstruction`.
 
     Returns:
-        (N, X, Y) CPR image with only the centerline structure retained, and all other structures removed.
+        Copy of the input `vessel_graph` with the transversal obstruction values added as edge attributes.
     """
-    # Create a 3D connectivity structure that ignores 3D connectivity between slices
-    intraslice_connectivity = np.stack(
-        [np.zeros((3, 3)), ndimage.generate_binary_structure(2, 1), np.zeros((3, 3))]
-    )
-    # Label connected components in each slice individually
-    labels, _ = ndimage.label(cpr, structure=intraslice_connectivity)
-    # Look at each slice's connectivity individually, since components that separate downstream might be connected
-    # near the root of the centerline, and thus 3D connectivity would not remove them
-    cpr_x_mid, cpr_y_mid = np.array(cpr.shape[1:]) // 2
-    centerline_labels = labels[
-        :, cpr_x_mid, cpr_y_mid
-    ]  # Labels of the components at the center of each CPR slice
-    return (
-        cpr * (centerline_labels == labels.T).T
-    )  # Ignore components disconnected from the center one
+    vessel_graph = vessel_graph.copy()
+
+    edges = vessel_graph.edges(data=True)
+    if progress_bar:
+        edges = tqdm(
+            edges, desc="Computing transversal obstructions", unit="vessel segment"
+        )
+
+    for source_node, target_node, edge_data in edges:
+        centerline = np.array(edge_data[centerline_key]).T  # (N, 3) -> (3, N)
+
+        # If the vessel mask is labelled by segment, use the edge ID to extract only the segment of interest
+        vessel_or_segment_mask = vessel_mask
+        if vessel_mask_by_segment:
+            vessel_id = int(edge_data["id"])
+
+            if np.any(vessel_mask == vessel_id):
+                vessel_or_segment_mask = vessel_mask == vessel_id
+            else:
+                logger.warning(
+                    f"The vessel mask does not contain any voxels for the segment with ID: '{vessel_id}'. "
+                    f"Including all vessel labels in the vessel mask for this specific segment."
+                )
+
+        obstruction_values = transversal_obstruction(
+            vessel_or_segment_mask,
+            obstruction_mask,
+            centerline,
+            **transversal_obstruction_kwargs,
+        )
+        # Add the computed obstruction values as an edge attribute
+        vessel_graph.edges[source_node, target_node][
+            obstruction_key
+        ] = obstruction_values
+
+    return vessel_graph
+
+
+# =============================================================================
+# MAIN ENTRY POINT
+# =============================================================================
+
+
+def integrate_embolism_into_graph(
+    vessel_graph: nx.Graph,
+    vessel_mask: np.ndarray,
+    embolism_objects: list[dict],
+    spacing: tuple[float, float, float],
+) -> nx.Graph:
+    """
+
+    Main function that orchestrates the complete pipeline for incorporating
+    embolism information into a vessel graph structure. Computes vessel volumes,
+    maps embolism locations to graph edges, and calculates obstruction metrics
+    for comprehensive embolism-vessel analysis.
+
+    Args:
+        vessel_graph: NetworkX graph representing vessel structure with edge IDs
+        vessel_mask: 3D numpy array with vessel IDs as values for spatial mapping
+        embolism_objects: List of embolism objects containing coordinates and metadata
+        spacing: Voxel spacing (x, y, z) in millimeters for accurate volume calculations
+
+    Returns:
+        nx.Graph: Updated vessel graph with comprehensive embolism annotations including:
+                 - total_vessel_voxels: Voxel count per vessel edge
+                 - total_vessel_volume_mm3/cm3: Vessel volumes per edge
+                 - has_embolism: Boolean flag for embolism presence
+                 - embolisms_ids: List of embolism IDs per edge
+                 - embolisms_voxel_counts: Voxel counts per embolism per edge
+                 - embolisms_volumes_mm3/cm3: Volumes per embolism per edge
+                 - total_embolism_volume_mm3/cm3: Total embolism volume per edge
+                 - volumetric_obstruction: Obstruction ratio per edge
+
+    Algorithm:
+        1. Validate input parameters (non-empty vessel mask)
+        2. Compute vessel voxel counts and volumes for each graph edge
+        3. Map embolism coordinates to vessel IDs and corresponding graph edges
+        4. Calculate embolism volumes and obstruction ratios per edge
+        5. Return enriched graph with complete embolism-vessel integration
+    """
+    if vessel_mask.size == 0:
+        raise ValueError("Vessel mask cannot be empty")
+
+    # Compute edge voxel counts
+    compute_edge_voxel_counts(vessel_mask, vessel_graph, spacing)
+
+    # Enrich graph with embolism data
+    enrich_graph_with_embolisms(vessel_graph, vessel_mask, embolism_objects, spacing)
+
+    return vessel_graph
