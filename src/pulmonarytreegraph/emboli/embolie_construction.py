@@ -1,12 +1,16 @@
 """
-Embolism Construction Module
+Pulmonary Embolism Construction Module
 
-This module provides functions for detecting, analyzing, and processing
-pulmonary embolisms from medical imaging masks.
+This module provides functions for detecting and processing pulmonary
+embolisms from masks.
 
 Core Functions:
 - separate_embolisms(): Detect individual embolism regions
 - create_embolism_objects(): Create structured embolism data
+
+Main Functions:
+- separate_embolisms(): Detection and separation of individual embolism regions
+- create_embolism_objects(): Creation of structured objects with embolism metadata
 """
 
 import logging
@@ -23,6 +27,11 @@ from pulmonarytreegraph.utils.metrics import (
 logger = logging.getLogger(__name__)
 
 
+# =============================================================================
+# EMBOLISM DETECTION AND SEPARATION
+# =============================================================================
+
+
 def separate_embolisms(
     mask_data: np.ndarray,
     spacing: tuple[float, float, float],
@@ -30,20 +39,30 @@ def separate_embolisms(
     fusion_threshold_mm: float = 10.0,
 ) -> list[np.ndarray]:
     """
-    Separate individual embolism regions from a binary mask.
+    Separate individual embolism from a binary mask.
 
-    Parameters:
-    - mask_data: Binary mask array containing embolisms
-    - spacing: Voxel spacing (x, y, z) in mm
-    - method: Method for separation ("connected_components" or "connected_components_with_threshold")
-    - fusion_threshold_mm: Distance threshold for fusing nearby components (in millimeters)
+    Main segmentation function that identifies distinct embolisms in a 3D binary
+    mask using connected component analysis, with optional fusion of nearby
+    components based on distance threshold.
+
+    Args:
+        mask_data: 3D binary mask containing embolisms (numpy.ndarray)
+        spacing: Voxel spacing (x, y, z) in millimeters
+        method: Separation method:
+               - "connected_components": Simple connected components
+               - "connected_components_with_threshold": With threshold-based fusion
+        fusion_threshold_mm: Distance threshold for component fusion (in mm)
 
     Returns:
-    - List of coordinate arrays for each separate embolism
+        list[np.ndarray]: List of coordinate arrays for each separated embolism
 
-    Raises:
-    - ValueError: If mask_data is empty or invalid method specified
-    - RuntimeError: If component separation fails
+    Algorithm:
+        1. Input parameter validation (mask, spacing, method)
+        2. Connected component labeling algorithm application
+        3. Geometric property extraction (coordinates) for each component
+        4. Optional fusion of nearby components based on specified threshold
+        5. Return list of individual identified embolisms
+
     """
     logger.info("Separating embolisms using method: %s", method)
 
@@ -100,15 +119,21 @@ def _fuse_nearby_components(
     spacing: tuple[float, float, float],
 ) -> list[np.ndarray]:
     """
-    Fuse connected components that are close to each other.
+    Fuse connected components that are spatially close according to distance threshold.
 
-    Parameters:
-    - embolisms: List of coordinate arrays for each embolism
-    - distance_threshold_voxels: Maximum distance between components to fuse (in voxels)
-    - spacing: Voxel spacing (x, y, z) in mm
+    Args:
+        embolisms: List of coordinate arrays for each embolism
+        distance_threshold_voxels: Maximum distance between components for fusion (voxels)
+        spacing: Voxel spacing (x, y, z) in mm for distance calculations
 
     Returns:
-    - List of fused embolism coordinate arrays
+        list[np.ndarray]: List of fused embolism coordinate arrays
+
+    Algorithm:
+        1. Iterate through embolism components
+        2. For each component, calculate distances to all others
+        3. If distance is below threshold, merge components
+        4. Repeat until no more fusions occur
     """
     logger.debug(
         "Starting component fusion with distance threshold: %.1f voxels",
@@ -194,12 +219,49 @@ def _fuse_nearby_components(
     return embolisms
 
 
+# =============================================================================
+# STRUCTURED OBJECT CREATION
+# =============================================================================
+
+
 def _create_objects_from_coordinates(
     embolism_coords: list[np.ndarray],
     patient_name: str,
     spacing: tuple[float, float, float],
 ) -> list[dict[str, Any]]:
-    """Helper function to create objects from already separated coordinates."""
+    """
+    Create structured objects from separated embolism coordinates.
+
+    Helper function that transforms raw embolism coordinates into structured
+    data objects with complete metadata including volumes, voxel counts, and
+    patient information for downstream analysis and standardized storage.
+
+    Args:
+        embolism_coords: List of coordinates for already separated embolisms
+        patient_name: Patient identifier for traceability
+        spacing: Voxel spacing for accurate volume calculations
+
+    Returns:
+        list[dict]: List of embolism dictionaries with complete metadata
+
+    Embolism Object Structure:
+        - id: Sequential numeric identifier (1 to n)
+        - patient_name: Patient name/identifier
+        - coordinates: 3D voxel coordinates of embolism (np.ndarray)
+        - voxel_count: Total number of voxels in embolism
+        - spacing: Voxel spacing used for calculations
+        - volume_mm3: Calculated volume in cubic millimeters
+        - volume_cm3: Calculated volume in cubic centimeters
+
+    Algorithm:
+        1. Validate input parameters (coordinates, patient name, spacing)
+        2. Iterate through embolism coordinates
+        3. For each embolism:
+           a. Calculate voxel count
+           b. Compute volumes using provided spacing
+           c. Construct structured dictionary with metadata
+        4. Return list of structured embolism objects
+    """
     if not embolism_coords:
         logger.warning("No embolism coordinates provided")
         return []
@@ -267,21 +329,30 @@ def create_embolism_objects(
     fusion_threshold_mm: float = 10.0,
 ) -> list[dict[str, Any]]:
     """
-    Create structured embolism objects from mask data.
+    Create structured embolism objects from binary mask data.
 
-    This function does the complete pipeline:
-    1. Separates embolisms from mask
-    2. Creates structured objects with volumes
+    Main orchestrating function implementing the complete pipeline for embolism
+    detection and characterization: separation of individual regions from binary
+    mask, followed by creation of structured data objects with volumes and
+    complete metadata.
 
-    Parameters:
-    - mask_data: Binary mask array containing embolisms
-    - patient_name: Patient identifier
-    - spacing: Voxel spacing for volume calculations
-    - separation_method: Method for separation ("connected_components" or "connected_components_with_threshold")
-    - fusion_threshold_mm: Distance threshold for component fusion
+    Args:
+        mask_data: 3D binary mask containing segmented embolisms
+        patient_name: Patient identifier for traceability and archival
+        spacing: Voxel spacing (x,y,z) for accurate volumetric calculations
+        separation_method: Embolism separation method:
+                          - "connected_components": Standard connected components
+                          - "connected_components_with_threshold": With fusion
+        fusion_threshold_mm: Distance threshold for component fusion (mm)
 
     Returns:
-    - List of embolism dictionaries with metadata
+        list[dict]: List of embolism objects with complete metadata
+
+    Algorithm:
+        1. Validate input parameters (mask, patient name, spacing)
+        2. Call separate_embolisms() to identify individual embolism regions
+        3. Call _create_objects_from_coordinates() to build structured objects
+        4. Return list of structured embolism objects
     """
     logger.info("Creating embolism objects for patient: %s", patient_name)
 
