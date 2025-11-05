@@ -315,6 +315,7 @@ def process_single_patient(
             save_all_step_volumes=processing_options.get(
                 "save_all_step_volumes", False
             ),
+            save_cycle_skeletons=processing_options.get("save_cycle_skeletons", False),
             embolism_separation_method=processing_options.get(
                 "embolism_separation_method", "connected_components"
             ),
@@ -748,6 +749,11 @@ Expected directory structure:
         action="store_true",
         help="Save vessel volumes at each processing step",
     )
+    parser.add_argument(
+        "--save-cycle-skeletons",
+        action="store_true",
+        help="Save skeletons of detected cycles before and after cleaning",
+    )
 
     parser.add_argument(
         "--embolism-separation-method",
@@ -810,8 +816,8 @@ Expected directory structure:
     parser.add_argument(
         "--generate-heatmaps",
         action="store_true",
-        default=True,
-        help="Generate segment heatmaps after processing (default: True)",
+        default=False,
+        help="Generate segment heatmaps after processing (default: False)",
     )
     parser.add_argument(
         "--batch-name",
@@ -961,12 +967,14 @@ Expected directory structure:
         "save_skeletons": args.save_skeletons,
         "save_colored_volumes": args.save_colored_volumes,
         "save_all_step_volumes": args.save_all_step_volumes,
+        "save_cycle_skeletons": args.save_cycle_skeletons,
         "embolism_separation_method": args.embolism_separation_method,
         "embolism_fusion_threshold": args.embolism_fusion_threshold,
         "skip_steps": args.skip_steps,
         "stop_after": args.stop_after,
         "compute_transversal_obstruction": args.compute_transversal_obstruction,
         "transversal_obstruction_kwargs": {"cpr_padding": args.cpr_padding},
+        "save_enriched_graphs": args.save_enriched_graphs,
         "enriched_graphs_dir": enriched_graphs_dir
         if args.save_enriched_graphs
         else None,

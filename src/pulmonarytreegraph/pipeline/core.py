@@ -2,6 +2,7 @@
 
 import logging
 import os
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -68,7 +69,7 @@ def preprocess_artery_mask(
     logger.info("Skeleton saved: %s", skeleton_path)
     distance_map_path = os.path.join(output_dir, "distance_map.nii.gz")
     save_mask(
-        distance_map.astype(mask.dtype),
+        distance_map,
         header,
         affine,
         distance_map_path,
@@ -107,6 +108,16 @@ def build_graph_from_skeleton(
 
     os.makedirs(output_dir, exist_ok=True)
 
+    # Extract patient_id from output directory
+    patient_id = os.path.basename(output_dir)
+
+    # Define statistics paths automatically
+    patient_stats_path = Path(output_dir) / "graph_construction_stats.csv"
+
+    # Global stats at the root of results directory
+    results_base_dir = os.path.dirname(output_dir)
+    global_stats_path = Path(results_base_dir) / "global_construction_stats.csv"
+
     logger.info("Loading skeleton: %s", skeleton_path)
     skeleton, header, spacing, affine = load_niftii(skeleton_path, "skeleton_original")
 
@@ -114,7 +125,17 @@ def build_graph_from_skeleton(
     distance_map, _, _, _ = load_niftii(distance_map_path, "distance_map")
 
     logger.info("Building branch graph...")
-    branch_graph = mask_to_branch_graph(skeleton, spacing, distance_map)
+    logger.info("Patient statistics will be saved to: %s", patient_stats_path)
+    logger.info("Global statistics will be saved to: %s", global_stats_path)
+
+    branch_graph = mask_to_branch_graph(
+        skeleton,
+        spacing,
+        distance_map,
+        patient_id=patient_id,
+        patient_stats_path=patient_stats_path,
+        global_stats_path=global_stats_path,
+    )
 
     logger.info(
         "Graph statistics: %d nodes, %d edges",
@@ -222,16 +243,19 @@ def clean_vessel_graph(
     coordinate_format: str = "both",
     save_skeleton: bool = False,
     save_colored_volumes: list[str] | None = None,
+    save_cycle_skeletons: bool = False,  # NEW PARAMETER
 ) -> dict[str, Any]:
     """
     Clean a graph by removing suspicious edges and short/thin branches.
+    Automatically generates cleaning statistics in two CSV files:
+    - Individual patient stats: {output_dir}/graph_cleaning_stats.csv
+    - Global batch stats: {results_base_dir}/global_cleaning_stats.csv
 
     Parameters:
     - graph_path: Path to input graph file
     - output_dir: Output directory (defaults to results/patient_name)
     - original_skeleton_path: Path to original skeleton file
     - arteries_mask_path: Path to arteries mask file (required for vessel volumes)
-    - distance_map_path: Path to pre-computed distance map (optional)
     - radius_ratio_threshold: Threshold for removing thin branches
     - coordinate_format: "voxel", "real", or "both"
     - save_skeleton: Whether to save both binary and edge_id colored skeleton from graph
@@ -246,6 +270,14 @@ def clean_vessel_graph(
 
     os.makedirs(output_dir, exist_ok=True)
 
+    # Extract patient_id
+    patient_id = os.path.basename(output_dir)
+
+    # Define statistics paths
+    patient_stats_path = os.path.join(output_dir, "graph_cleaning_stats.csv")
+    results_base_dir = os.path.dirname(output_dir)
+    global_stats_path = os.path.join(results_base_dir, "global_cleaning_stats.csv")
+
     logger.info("Loading graph: %s", graph_path)
     graph = load_graph(graph_path)
 
@@ -253,8 +285,26 @@ def clean_vessel_graph(
         "Original graph: %d nodes, %d edges", len(graph.nodes), len(graph.edges)
     )
 
+    # Prepare cycle skeleton saving parameters
+    cycle_skeletons_dir = None
+    if save_cycle_skeletons:
+        cycle_skeletons_dir = os.path.join(output_dir, "cycle_skeletons")
+        logger.info("Cycle skeletons will be saved to: %s", cycle_skeletons_dir)
+
     logger.info("Cleaning graph...")
-    cleaned_graph = clean_graph(graph, radius_ratio_threshold=radius_ratio_threshold)
+    logger.info("Patient statistics will be saved to: %s", patient_stats_path)
+    logger.info("Global statistics will be saved to: %s", global_stats_path)
+
+    cleaned_graph = clean_graph(
+        graph,
+        radius_ratio_threshold=radius_ratio_threshold,
+        patient_id=patient_id,
+        patient_stats_path=patient_stats_path,
+        global_stats_path=global_stats_path,
+        save_cycle_skeletons=save_cycle_skeletons,
+        cycle_skeletons_dir=cycle_skeletons_dir,
+        reference_skeleton_path=original_skeleton_path,
+    )
 
     logger.info(
         "Cleaned graph: %d nodes, %d edges",
@@ -394,12 +444,20 @@ def clean_vessel_graph(
             volume_paths[color_by] = volume_output
             logger.info("Vessel volume (%s) saved: %s", color_by, volume_output)
 
-    return {
+    result = {
         "graph_paths": graph_paths,
         "skeleton_paths": skeleton_paths,
         "volume_paths": volume_paths,
         "graph_object": cleaned_graph,
+        "patient_stats_path": patient_stats_path,
+        "global_stats_path": global_stats_path,
     }
+
+    # Add cycle skeleton paths if they were saved
+    if save_cycle_skeletons and cycle_skeletons_dir:
+        result["cycle_skeletons_dir"] = cycle_skeletons_dir
+
+    return result
 
 
 def orient_vessel_graph(
@@ -967,7 +1025,8 @@ def process_patient_complete_pipeline(
     coordinate_format: str = "both",
     save_skeletons: bool = False,
     save_colored_volumes: list[str] | None = None,
-    save_all_step_volumes: bool = False,  # NEW PARAMETER
+    save_all_step_volumes: bool = False,
+    save_cycle_skeletons: bool = False,
     embolism_separation_method: str = "connected_components",
     embolism_fusion_threshold: float = 10.0,
     skip_steps: list[str] | None = None,
@@ -990,13 +1049,15 @@ def process_patient_complete_pipeline(
     - save_skeletons: Whether to save skeleton representations
     - save_colored_volumes: List of volume types to save (only applied to labeling step by default)
     - save_all_step_volumes: If True, save colored volumes for all steps (clean, orient, label)
-    - vessel_expansion_method: Method for vessel volume expansion
+    - save_cycle_skeletons: If True, save skeletons of cycles before and after cleaning
     - embolism_separation_method: Method for separating embolisms
     - embolism_fusion_threshold: Distance threshold for embolism fusion
     - skip_steps: List of steps to skip ["preprocess", "build", "clean", "orient", "label", "embolism"]
     - stop_after: Stop processing after specified step
     - diameter_threshold: Minimum diameter ratio for trunk vessels (default: 0.5)
     - length_threshold: Maximum length/diameter ratio for trunk vessels (default: 1.5)
+    - compute_transversal_obstruction: Compute transversal obstruction metrics
+    - transversal_obstruction_kwargs: Additional parameters for transversal obstruction
 
     Returns:
     - Dictionary with all pipeline results
@@ -1025,11 +1086,12 @@ def process_patient_complete_pipeline(
     if save_colored_volumes:
         if save_all_step_volumes:
             logger.info(
-                "Colored volumes will be saved for ALL steps: %s", save_colored_volumes
+                "Colored volumes will be saved for all steps (clean, orient, label): %s",
+                save_colored_volumes,
             )
         else:
             logger.info(
-                "Colored volumes will be saved ONLY for labeling step: %s",
+                "Colored volumes will be saved only for labeling step: %s",
                 save_colored_volumes,
             )
 
@@ -1117,6 +1179,7 @@ def process_patient_complete_pipeline(
                 coordinate_format=coordinate_format,
                 save_skeleton=save_skeletons,
                 save_colored_volumes=clean_volumes,
+                save_cycle_skeletons=save_cycle_skeletons,
             )
             pipeline_results["graph_cleaning"] = clean_result
 

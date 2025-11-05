@@ -4,12 +4,102 @@ This module provides functionality to clean and optimize graph representations
 of pulmonary vascular trees by removing suspicious cycles, short branches, and fusing segments.
 """
 
+import csv
 import logging
+from pathlib import Path
 
 import networkx as nx
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+# =============================================================================
+# STATISTICS TRACKING FUNCTIONS
+# =============================================================================
+
+
+def _get_detailed_stats(graph: nx.Graph) -> dict:
+    """Calculate detailed graph statistics for comprehensive monitoring."""
+    stats = {
+        "nodes": graph.number_of_nodes(),
+        "edges": graph.number_of_edges(),
+        "terminals": 0,  # degree 1
+        "bifurcation": 0,  # degree 3+
+        "linear": 0,  # degree 2
+        "isolated": 0,  # degree 0
+        "cycles": len(nx.cycle_basis(graph)) if graph.number_of_edges() > 0 else 0,
+        "components": nx.number_connected_components(graph),
+    }
+
+    for node in graph.nodes:
+        degree = graph.degree(node)
+        if degree == 0:
+            stats["isolated"] += 1
+        elif degree == 1:
+            stats["terminals"] += 1
+        elif degree == 2:
+            stats["linear"] += 1
+        else:  # degree >= 3
+            stats["bifurcation"] += 1
+
+    return stats
+
+
+def _initialize_stats_csv(output_path: Path) -> None:
+    """Create CSV file with header for cleaning statistics."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(output_path, "w", newline="") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(
+            [
+                "patient_id",
+                "step",
+                "nodes",
+                "edges",
+                "terminals",
+                "bifurcation",
+                "linear",
+                "isolated",
+                "cycles",
+                "nodes_removed",
+                "edges_removed",
+            ]
+        )
+
+
+def _append_stats_to_csv(
+    output_path: Path,
+    patient_id: str,
+    step: str,
+    stats: dict,
+    previous_stats: dict | None = None,
+) -> None:
+    """Append statistics row to CSV file."""
+    nodes_removed = 0
+    edges_removed = 0
+    if previous_stats:
+        nodes_removed = previous_stats["nodes"] - stats["nodes"]
+        edges_removed = previous_stats["edges"] - stats["edges"]
+
+    with open(output_path, "a", newline="") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(
+            [
+                patient_id,
+                step,
+                stats["nodes"],
+                stats["edges"],
+                stats["terminals"],
+                stats["bifurcation"],
+                stats["linear"],
+                stats["isolated"],
+                stats["cycles"],
+                nodes_removed,
+                edges_removed,
+            ]
+        )
+
 
 # =============================================================================
 # UTILITY FUNCTIONS
@@ -155,6 +245,11 @@ def detect_radius_pattern(
 
         # Check if minimum is at the endpoints (normal case)
         if min_idx == 0 or min_idx == len(radius_array) - 1:
+            logger.debug(
+                "Minimum radius at endpoint (index %d of %d) - not a constriction pattern",
+                min_idx,
+                len(radius_array),
+            )
             return False
 
         # Calculate ratios
@@ -171,17 +266,36 @@ def detect_radius_pattern(
 
         # Avoid division by zero
         if max_before <= 0 or min_value <= 0:
+            logger.debug(
+                "Invalid radius values: max_before=%.3f, min_value=%.3f",
+                max_before,
+                min_value,
+            )
             return False
 
         decrease_ratio = (max_before - min_value) / max_before
         increase_ratio = (max_after - min_value) / min_value
 
-        result = decrease_ratio > threshold_factor and increase_ratio > threshold_factor
-        logger.debug(
-            "Pattern detection result: %s (decrease: %.3f, increase: %.3f)",
-            result,
+        # FIXED: Use >= instead of > to include boundary cases
+        result = (
+            decrease_ratio >= threshold_factor and increase_ratio >= threshold_factor
+        )
+
+        logger.info(
+            "Pattern analysis: min_idx=%d/%d, pattern: %.3f → %.3f → %.3f",
+            min_idx,
+            len(radius_array),
+            max_before,
+            min_value,
+            max_after,
+        )
+        logger.info(
+            "Ratios: decrease=%.3f (threshold=%.3f), increase=%.3f (threshold=%.3f) → %s",
             decrease_ratio,
+            threshold_factor,
             increase_ratio,
+            threshold_factor,
+            "DETECTED" if result else "NOT DETECTED",
         )
 
         return result
@@ -740,62 +854,620 @@ def remove_single_neighbor_nodes(graph: nx.Graph) -> nx.Graph:
 # =============================================================================
 
 
-def _remove_suspicious_cycle_edges(graph: nx.Graph) -> int:
+def _get_radius_pattern_ratios(
+    radius_list: list[float], threshold_factor: float = 0.5
+) -> tuple[float, float] | None:
+    """
+    Calculate decrease and increase ratios for radius pattern analysis.
+
+    Returns the actual ratios if suspicious pattern detected, None otherwise.
+    This is a helper function for _remove_suspicious_cycle_edges.
+
+    Args:
+        radius_list: Sequence of radius values along the vessel segment
+        threshold_factor: Base threshold for ratio evaluation
+
+    Returns:
+        tuple: (decrease_ratio, increase_ratio) if suspicious, None otherwise
+
+    Detection criteria:
+        - STRICT (threshold >= 0.5): Both ratios >= threshold_factor
+        - RELAXED (threshold < 0.5): Uses multiple criteria:
+          1. Both ratios >= threshold_factor (original criterion)
+          2. OR combined score >= 0.7 AND pattern is balanced (balance_score >= 0.6)
+
+    Balance score measures symmetry: min(decrease, increase) / max(decrease, increase)
+    A balanced pattern (both decrease and increase significant) indicates fusion artifact.
+    An unbalanced pattern (one very strong) indicates normal anatomical variation.
+    """
+    try:
+        # Reuse existing logic from detect_radius_pattern but return ratios
+        if radius_list is None:
+            return None
+
+        # Handle numpy arrays specifically
+        if isinstance(radius_list, np.ndarray):
+            if radius_list.size == 0:
+                return None
+            radius_array = radius_list.copy()
+        # Handle lists and tuples
+        elif isinstance(radius_list, list | tuple):
+            if len(radius_list) == 0:
+                return None
+            if len(radius_list) < 3:
+                return None
+            # Check if it's a nested structure
+            if len(radius_list) > 0 and isinstance(
+                radius_list[0], list | tuple | np.ndarray
+            ):
+                # Flatten nested structure
+                flattened = []
+                for item in radius_list:
+                    if isinstance(item, list | tuple):
+                        flattened.extend(item)
+                    elif isinstance(item, np.ndarray):
+                        flattened.extend(item.flatten())
+                    else:
+                        flattened.append(item)
+                radius_array = np.asarray(flattened)
+            else:
+                radius_array = np.asarray(radius_list)
+        else:
+            try:
+                radius_array = np.asarray(radius_list)
+                if radius_array.size == 0:
+                    return None
+            except (ValueError, TypeError):
+                return None
+
+        # Ensure it's 1D and has enough elements
+        if radius_array.ndim != 1:
+            radius_array = radius_array.flatten()
+
+        if radius_array.size < 3:
+            return None
+
+        # Check if we have valid numeric data
+        if not np.issubdtype(radius_array.dtype, np.number):
+            return None
+
+        # Check for NaN or infinite values
+        if not np.isfinite(radius_array).all():
+            return None
+
+        # Calculate min and its index
+        min_value = np.min(radius_array)
+        min_idx = np.argmin(radius_array)
+
+        # Ensure min_idx is a scalar integer
+        if hasattr(min_idx, "item"):
+            min_idx = min_idx.item()
+        min_idx = int(min_idx)
+
+        # Check if minimum is at the endpoints (normal case)
+        if min_idx == 0 or min_idx == len(radius_array) - 1:
+            return None
+
+        # Calculate ratios
+        max_before = np.max(radius_array[:min_idx])
+        max_after = np.max(radius_array[min_idx:])
+
+        # Ensure these are scalars
+        if hasattr(max_before, "item"):
+            max_before = max_before.item()
+        if hasattr(max_after, "item"):
+            max_after = max_after.item()
+        if hasattr(min_value, "item"):
+            min_value = min_value.item()
+
+        # Avoid division by zero
+        if max_before <= 0 or min_value <= 0:
+            return None
+
+        decrease_ratio = (max_before - min_value) / max_before
+        increase_ratio = (max_after - min_value) / min_value
+        combined_score = decrease_ratio + increase_ratio
+
+        # Calculate balance score: how symmetric is the pattern?
+        # 1.0 = perfectly balanced, 0.0 = completely unbalanced
+        balance_score = (
+            min(decrease_ratio, increase_ratio) / max(decrease_ratio, increase_ratio)
+            if max(decrease_ratio, increase_ratio) > 0
+            else 0
+        )
+
+        logger.debug(
+            "Calculated ratios: decrease=%.3f, increase=%.3f, combined=%.3f, balance=%.3f",
+            decrease_ratio,
+            increase_ratio,
+            combined_score,
+            balance_score,
+        )
+
+        # MODIFIED DETECTION LOGIC:
+        # For strict threshold (0.5): require both ratios >= 0.5 (original behavior)
+        # For relaxed threshold (0.4): prioritize balanced patterns (fusion artifacts)
+
+        if threshold_factor >= 0.5:
+            # Strict mode: both ratios must exceed threshold
+            if (
+                decrease_ratio >= threshold_factor
+                and increase_ratio >= threshold_factor
+            ):
+                logger.debug("STRICT detection: both ratios >= %.3f", threshold_factor)
+                return decrease_ratio, increase_ratio
+        else:
+            # Relaxed mode: detect balanced patterns that suggest fusion artifacts
+            min_combined_score = 0.7  # Require combined score >= 0.7
+            min_balance_score = 0.6  # Require balance >= 0.6 (reasonably symmetric)
+
+            # Criterion 1: Both ratios meet threshold (original)
+            if (
+                decrease_ratio >= threshold_factor
+                and increase_ratio >= threshold_factor
+            ):
+                logger.debug("RELAXED detection: both ratios >= %.3f", threshold_factor)
+                return decrease_ratio, increase_ratio
+
+            # Criterion 2: Good combined score AND balanced pattern (NEW)
+            # This catches fusion artifacts where both decrease and increase are significant
+            # but one might be slightly below threshold
+            elif (
+                combined_score >= min_combined_score
+                and balance_score >= min_balance_score
+            ):
+                logger.debug(
+                    "RELAXED detection (balanced pattern): combined=%.3f >= %.3f, balance=%.3f >= %.3f",
+                    combined_score,
+                    min_combined_score,
+                    balance_score,
+                    min_balance_score,
+                )
+                return decrease_ratio, increase_ratio
+
+            # Unbalanced patterns (one ratio very strong, other weak) are NOT detected
+            # This preserves edges like 183 with decrease=0.673, increase=0.229, balance=0.34
+            else:
+                logger.debug(
+                    "NOT detected: combined=%.3f, balance=%.3f (unbalanced pattern - likely anatomical)",
+                    combined_score,
+                    balance_score,
+                )
+
+        return None
+
+    except Exception as e:
+        logger.error("Error in _get_radius_pattern_ratios: %s", e)
+        return None
+
+
+def _detect_fusion_artifacts(edge_data: dict) -> tuple[float, str] | None:
+    """
+    Detect fusion artifacts using geometric criteria.
+
+    Returns inverted ratio (for sorting) and reason if edge is suspicious, None otherwise.
+    For fusion detection, we want the SMALLEST length-to-diameter ratio to win.
+    """
+    try:
+        length = edge_data.get("length", 0)
+        mean_radius = edge_data.get("mean_radius", 0)
+
+        # Ensure scalar values
+        if hasattr(length, "item"):
+            length = length.item()
+        if hasattr(mean_radius, "item"):
+            mean_radius = mean_radius.item()
+
+        if float(length) <= 0 or float(mean_radius) <= 0:
+            return None
+
+        # Very short branch (much shorter than parent diameter)
+        diameter = 2 * float(mean_radius)
+
+        logger.debug(
+            "length=%.2f, diameter=%.2f, length/diameter=%.2f",
+            length,
+            diameter,
+            length / diameter,
+        )
+
+        if length < diameter:
+            logger.debug(
+                "Possible fusion artifact detected (ID %s): length=%.2f < diameter=%.2f",
+                edge_data.get("id", "unknown"),
+                length,
+                diameter,
+            )
+            length_to_diameter_ratio = length / diameter
+            inverted_priority = (
+                1.0 / length_to_diameter_ratio
+            )  # Small ratio = high priority
+            reason = f"short_fusion_ratio_{length_to_diameter_ratio:.3f}"
+
+            return length_to_diameter_ratio, inverted_priority, reason
+        else:
+            return None
+
+    except Exception as e:
+        logger.error("Error in _detect_fusion_artifacts: %s", e)
+        return None
+
+
+def _remove_suspicious_cycle_edges(
+    graph: nx.Graph,
+) -> tuple[int, list[tuple[list[tuple[int, int]], list[tuple[int, int]]]]]:
     """
     Detect and remove edges in cycles that show suspicious radius patterns.
 
-    Vascular networks are typically tree-like; cycles usually indicate false
-    connections created during segmentation due to close proximity of vessels.
-    This function identifies cycles and removes edges showing constriction
-    patterns characteristic of artifacts.
-
-    Args:
-        graph: NetworkX graph to clean (modified in-place)
+    Uses a two-pass approach:
+    1. First pass: Normal threshold (0.5), re-detects cycles after each modification
+    2. Second pass: Relaxed threshold (0.4) for remaining cycles without removals
 
     Returns:
-        int: Number of edges removed
+        tuple: (num_removed: int, cycle_tracking: list)
+               cycle_tracking contains tuples of (original_cycle, remaining_edges)
+               for each cycle that had edges removed
 
-    Algorithm:
-        1. Detect all cycles using get_cycle_edges()
-        2. For each edge in each cycle:
-           - Extract radius profile along the edge
-           - Test for constriction pattern using detect_radius_pattern()
-           - Remove edge if pattern detected
-        3. Log removed edge IDs for traceability
+    Algorithm per pass:
+        1. Detect cycles
+        2. Inspect first cycle, if edge removed → restart iteration
+        3. If no edge removed from first cycle → inspect second cycle
+        4. Continue until all cycles inspected OR an edge is removed
+        5. If edge removed → restart iteration (re-detect cycles)
+        6. If no edges removed in complete iteration → pass complete
     """
     removed_edges = []
+    cycle_tracking = []
 
     try:
-        logger.debug("Getting cycle edges")
-        cycles = get_cycle_edges(graph)
-        logger.debug("Found %d cycles", len(cycles))
+        # STEP 0: Remove self-loops first (always artifacts)
+        logger.info("=== STEP 0: Removing self-loops ===")
+        self_loops = []
 
-        for i, cycle in enumerate(cycles):
-            logger.debug("Processing cycle %d with %d edges", i, len(cycle))
+        for node in list(graph.nodes):
+            if graph.has_edge(node, node):
+                edge_data = graph.edges[node, node]
+                edge_id = edge_data.get("id", "unknown")
+                self_loops.append((node, edge_id))
 
-            for j, edge in enumerate(cycle):
-                logger.debug("Processing edge %d: %s", j, edge)
+                logger.info("Found self-loop: Node %d [ID: %s] → itself", node, edge_id)
 
+                # Remove the self-loop
+                graph.remove_edge(node, node)
+                removed_edges.append(((node, node), edge_id))
+
+                logger.info("  → Removed self-loop: Node %d [ID: %s]", node, edge_id)
+
+        if self_loops:
+            logger.info(
+                "Removed %d self-loops with IDs: %s",
+                len(self_loops),
+                [edge_id for _, edge_id in self_loops],
+            )
+        else:
+            logger.info("No self-loops found")
+
+        # Two-pass approach: radius patterns (0.5), then relaxed radius (0.4)
+        pass_configs = [
+            {"type": "radius", "threshold": 0.5, "name": "radius pattern (strict)"},
+            {"type": "radius", "threshold": 0.4, "name": "radius pattern (relaxed)"},
+        ]
+
+        for pass_number, config in enumerate(pass_configs, 1):
+            pass_threshold = config["threshold"]
+            pass_name = config["name"]
+
+            logger.info("=== PASS %d: Using %s ===", pass_number, pass_name)
+
+            pass_removed_count = 0
+            iteration = 1
+            max_iterations = 50  # Safety limit per pass
+
+            while iteration <= max_iterations:
                 try:
-                    edge_data = get_edge_data(graph, *edge)
-                    if edge_data:
-                        radius_data = edge_data.get("radius", [])
-                        logger.debug(
-                            "Radius data type: %s, length: %d",
-                            type(radius_data),
-                            len(radius_data) if hasattr(radius_data, "__len__") else 0,
+                    logger.info(
+                        "Pass %d, Iteration %d: Getting cycle edges",
+                        pass_number,
+                        iteration,
+                    )
+                    cycles = get_cycle_edges(graph)
+
+                    if not cycles:
+                        logger.info("No cycles found in iteration %d", iteration)
+                        break
+
+                    logger.info(
+                        "Found %d cycles in iteration %d", len(cycles), iteration
+                    )
+
+                    # Process cycles one by one until all inspected OR edge removed
+                    edge_removed_this_iteration = False
+
+                    for cycle_index, cycle in enumerate(cycles):
+                        logger.info(
+                            "Processing cycle %d/%d with %d edges",
+                            cycle_index + 1,
+                            len(cycles),
+                            len(cycle),
                         )
 
-                        if detect_radius_pattern(radius_data):
+                        # Extract cycle information with positions
+                        cycle_nodes = set()
+                        for edge in cycle:
+                            cycle_nodes.add(edge[0])
+                            cycle_nodes.add(edge[1])
+
+                        logger.info("Cycle %d detected (undirected)", cycle_index + 1)
+                        logger.info(
+                            "Cycle %d has %d edges involving %d nodes",
+                            cycle_index + 1,
+                            len(cycle),
+                            len(cycle_nodes),
+                        )
+
+                        # SKIP cycles with self-loops (should be eliminated in Step 0)
+                        has_self_loop = any(edge[0] == edge[1] for edge in cycle)
+                        if has_self_loop:
+                            logger.warning(
+                                "Cycle %d contains self-loop - skipping",
+                                cycle_index + 1,
+                            )
+                            continue
+
+                        # Log cycle edges with positions
+                        for u, v in cycle:
+                            pos_u = graph.nodes[u].get("pos", "unknown")
+                            pos_v = graph.nodes[v].get("pos", "unknown")
+                            edge_data = get_edge_data(graph, u, v)
+                            edge_id = (
+                                edge_data.get("id", "unknown")
+                                if edge_data
+                                else "unknown"
+                            )
+
+                            edge_idx = cycle.index((u, v)) + 1
+                            logger.info(
+                                "  Cycle %d edge %d [ID: %s]: Node %d @%s ↔ Node %d @%s",
+                                cycle_index + 1,
+                                edge_idx,
+                                edge_id,
+                                u,
+                                pos_u,
+                                v,
+                                pos_v,
+                            )
+
+                        # Summary of all nodes involved
+                        logger.info(
+                            "All nodes in cycle %d: %s",
+                            cycle_index + 1,
+                            sorted(cycle_nodes),
+                        )
+
+                        # Track original cycle for potential tracking
+                        original_cycle = cycle.copy()
+
+                        # Collect all suspicious edges with their ratios for THIS cycle
+                        suspicious_edges_with_ratios = []
+
+                        # Check each edge in this cycle for suspicion and collect ratios
+                        for edge in cycle:
+                            node1, node2 = edge
+
+                            # Skip self-loops (should not exist at this point)
+                            if node1 == node2:
+                                logger.warning(
+                                    "Self-loop found in cycle analysis: (%d, %d) - skipping",
+                                    node1,
+                                    node2,
+                                )
+                                continue
+
+                            pos1 = graph.nodes[node1].get("pos", "unknown")
+                            pos2 = graph.nodes[node2].get("pos", "unknown")
+
+                            try:
+                                edge_data = get_edge_data(graph, *edge)
+                                if edge_data:
+                                    edge_id = edge_data.get("id", "unknown")
+                                    logger.info(
+                                        "Checking edge (%d, %d) [ID: %s]: positions %s ↔ %s",
+                                        node1,
+                                        node2,
+                                        edge_id,
+                                        pos1,
+                                        pos2,
+                                    )
+
+                                    # Radius pattern detection only
+                                    radius_data = edge_data.get("radius", [])
+                                    ratios = _get_radius_pattern_ratios(
+                                        radius_data, threshold_factor=pass_threshold
+                                    )
+
+                                    if ratios is not None:  # Edge is suspicious
+                                        decrease_ratio, increase_ratio = ratios
+                                        combined_ratio = decrease_ratio + increase_ratio
+
+                                        detection_info = {
+                                            "decrease_ratio": decrease_ratio,
+                                            "increase_ratio": increase_ratio,
+                                            "combined_ratio": combined_ratio,
+                                            "detection_type": f"radius_pattern_th_{pass_threshold}",
+                                        }
+
+                                        logger.info(
+                                            "  Suspicious edge (%d, %d) [ID: %s]: decrease=%.3f, increase=%.3f, combined=%.3f",
+                                            node1,
+                                            node2,
+                                            edge_id,
+                                            decrease_ratio,
+                                            increase_ratio,
+                                            combined_ratio,
+                                        )
+
+                                        suspicious_edges_with_ratios.append(
+                                            {
+                                                "edge": edge,
+                                                "edge_data": edge_data,
+                                                "decrease_ratio": detection_info[
+                                                    "decrease_ratio"
+                                                ],
+                                                "increase_ratio": detection_info[
+                                                    "increase_ratio"
+                                                ],
+                                                "combined_ratio": detection_info[
+                                                    "combined_ratio"
+                                                ],
+                                                "detection_type": detection_info[
+                                                    "detection_type"
+                                                ],
+                                            }
+                                        )
+
+                            except Exception as e:
+                                logger.error(
+                                    "Error processing edge (%d, %d) in cycle %d: %s",
+                                    node1,
+                                    node2,
+                                    cycle_index + 1,
+                                    e,
+                                )
+                                continue
+
+                        # Remove only the most suspicious edge (highest combined ratio) from THIS cycle
+                        if suspicious_edges_with_ratios:
+                            # Sort by combined ratio (highest first)
+                            suspicious_edges_with_ratios.sort(
+                                key=lambda x: x["combined_ratio"], reverse=True
+                            )
+
+                            # Remove only the most suspicious edge
+                            most_suspicious = suspicious_edges_with_ratios[0]
+                            edge = most_suspicious["edge"]
+                            edge_data = most_suspicious["edge_data"]
+                            detection_type = most_suspicious["detection_type"]
+
+                            logger.info(
+                                "Cycle %d: Found %d suspicious edges, removing most suspicious: (%d, %d) [ID: %s] with score %.3f (%s)",
+                                cycle_index + 1,
+                                len(suspicious_edges_with_ratios),
+                                edge[0],
+                                edge[1],
+                                edge_data.get("id", "unknown"),
+                                most_suspicious["combined_ratio"],
+                                detection_type,
+                            )
+
+                            # Log all suspicious edges for comparison
+                            for idx, sus_edge in enumerate(
+                                suspicious_edges_with_ratios
+                            ):
+                                rank_text = (
+                                    "SELECTED" if idx == 0 else f"rank {idx + 1}"
+                                )
+                                logger.info(
+                                    "  %s: (%d, %d) [ID: %s] - score=%.3f (%s)",
+                                    rank_text,
+                                    sus_edge["edge"][0],
+                                    sus_edge["edge"][1],
+                                    sus_edge["edge_data"].get("id", "unknown"),
+                                    sus_edge["combined_ratio"],
+                                    sus_edge["detection_type"],
+                                )
+
                             if graph.has_edge(*edge):
+                                # Remove the edge
                                 removed_edges.append(
                                     (edge, edge_data.get("id", "unknown"))
                                 )
                                 graph.remove_edge(*edge)
-                                logger.debug("Removed suspicious edge: %s", edge)
+                                pass_removed_count += 1
+                                edge_removed_this_iteration = True
+
+                                # Track this modified cycle
+                                remaining_edges = [
+                                    e for e in original_cycle if e != edge
+                                ]
+                                cycle_tracking.append((original_cycle, remaining_edges))
+
+                                logger.info(
+                                    "  → Removed most suspicious edge from cycle %d: (%d, %d) [ID: %s] (pass=%d, score=%.3f, %s)",
+                                    cycle_index + 1,
+                                    edge[0],
+                                    edge[1],
+                                    edge_data.get("id", "unknown"),
+                                    pass_number,
+                                    most_suspicious["combined_ratio"],
+                                    detection_type,
+                                )
+
+                                # STOP processing cycles - restart iteration
+                                logger.info(
+                                    "Edge removed - stopping cycle inspection and restarting iteration"
+                                )
+                                break
+                        else:
+                            logger.info(
+                                "Cycle %d: No edges removed (no suspicious patterns found with %s)",
+                                cycle_index + 1,
+                                pass_name,
+                            )
+
+                    # Summary of this iteration
+                    if edge_removed_this_iteration:
+                        logger.info(
+                            "Iteration %d: Edge removed - restarting with fresh cycle detection",
+                            iteration,
+                        )
+                    else:
+                        logger.info(
+                            "Iteration %d: No edges removed from any cycle - pass %d complete",
+                            iteration,
+                            pass_number,
+                        )
+                        break  # No more changes possible in this pass
+
+                    iteration += 1
+
                 except Exception as e:
-                    logger.error("Error processing edge %s in cycle %d: %s", edge, i, e)
-                    continue
+                    logger.error("Error in iteration %d: %s", iteration, e)
+                    import traceback
+
+                    logger.error("Full traceback: %s", traceback.format_exc())
+                    break
+
+            # End of iterations for this pass
+            if iteration > max_iterations:
+                logger.warning(
+                    "Reached maximum iterations (%d) for pass %d",
+                    max_iterations,
+                    pass_number,
+                )
+
+            logger.info(
+                "Pass %d complete: removed %d edges total",
+                pass_number,
+                pass_removed_count,
+            )
+
+            # Decide whether to proceed to next pass
+            if pass_number < len(pass_configs):
+                # Check if cycles remain for next pass
+                remaining_cycles = get_cycle_edges(graph)
+                if remaining_cycles:
+                    logger.info(
+                        "Pass %d complete but %d cycles remain. Proceeding to pass %d.",
+                        pass_number,
+                        len(remaining_cycles),
+                        pass_number + 1,
+                    )
+                else:
+                    logger.info(
+                        "Pass %d eliminated all cycles. Skipping remaining passes.",
+                        pass_number,
+                    )
+                    break
 
     except Exception as e:
         logger.error("Error in _remove_suspicious_cycle_edges: %s", e)
@@ -803,15 +1475,34 @@ def _remove_suspicious_cycle_edges(graph: nx.Graph) -> int:
 
         logger.error("Full traceback: %s", traceback.format_exc())
 
+    # Final summary
     if removed_edges:
         edge_ids = [str(edge_id) for _, edge_id in removed_edges]
         logger.info(
-            "Removed %d suspicious cycle edges with IDs: %s",
+            "=== FINAL SUMMARY: Removed %d suspicious cycle edges with IDs: %s ===",
             len(removed_edges),
             edge_ids,
         )
+    else:
+        logger.info("=== FINAL SUMMARY: No suspicious cycle edges were removed ===")
 
-    return len(removed_edges)
+    # Check for remaining cycles
+    final_cycles = get_cycle_edges(graph)
+    if final_cycles:
+        logger.warning(
+            "=== %d cycles still remain after cleaning ===", len(final_cycles)
+        )
+        for i, cycle in enumerate(final_cycles):
+            logger.warning(
+                "  Remaining cycle %d: %d edges involving nodes %s",
+                i + 1,
+                len(cycle),
+                sorted(set(node for edge in cycle for node in edge)),
+            )
+    else:
+        logger.info("=== All cycles successfully removed ===")
+
+    return len(removed_edges), cycle_tracking
 
 
 def _count_large_terminal_vessels(graph: nx.Graph, min_diameter: float = 10.0) -> int:
@@ -1087,18 +1778,7 @@ def _validate_graph_structure(graph: nx.Graph) -> bool:
     """
     Verify that graph contains required node and edge attributes.
 
-    This validation function ensures the input graph has the necessary
-    attributes for cleaning operations. Prevents runtime errors and
-    provides clear feedback about missing data.
-
-    Args:
-        graph: NetworkX graph to validate
-
-    Returns:
-        bool: True if graph structure is valid, False otherwise
-
-    Validation Checks:
-        - Node attributes: "radius", "pos" (required)
+    This
         - Edge attributes: "length", "radius", "centerline", "id" (optional)
         - Empty graph handling (considered valid)
 
@@ -1164,7 +1844,7 @@ def get_graph_stats(graph: nx.Graph) -> dict[str, int]:
         "nodes": graph.number_of_nodes(),
         "edges": graph.number_of_edges(),
         "terminals": degree_counts.get(1, 0),  # degree 1
-        "branches": degree_counts.get(3, 0) + degree_counts.get(4, 0),  # degree 3+
+        "bifurcation": degree_counts.get(3, 0) + degree_counts.get(4, 0),  # degree 3+
         "linear": degree_counts.get(2, 0),  # degree 2
     }
 
@@ -1173,13 +1853,19 @@ def clean_graph(
     graph: nx.Graph,
     radius_ratio_threshold: float = 0.3,
     length_ratio_threshold: float = 1.5,
+    patient_id: str | None = None,
+    patient_stats_path: Path | None = None,
+    global_stats_path: Path | None = None,
+    save_cycle_skeletons: bool = False,
+    cycle_skeletons_dir: Path | None = None,
+    reference_skeleton_path: Path | None = None,
 ) -> nx.Graph:
     """
-    Execute comprehensive graph cleaning pipeline with full error handling.
+    Execute comprehensive graph cleaning pipeline with statistics tracking.
 
     This is the main entry point for graph cleaning operations. It orchestrates
     the complete cleaning pipeline while providing validation, error handling,
-    and progress monitoring.
+    and progress monitoring. Statistics are always generated.
 
     Args:
         graph: NetworkX graph to clean (not modified, copy returned)
@@ -1187,19 +1873,23 @@ def clean_graph(
                                Range: (0, 1), default 0.3
         length_ratio_threshold: Length factor relative to parent diameter
                                Range: > 0, default 1.5
+        patient_id: Optional patient identifier for statistics tracking
+        patient_stats_path: Path to patient-specific CSV file (required)
+        global_stats_path: Path to global CSV file (required)
+        save_cycle_skeletons: If True, save skeletons of cycles before/after cleaning
+        cycle_skeletons_dir: Directory to save cycle skeletons (required if save_cycle_skeletons=True)
+        reference_skeleton_path: Path to reference skeleton for header/affine (required if save_cycle_skeletons=True)
 
     Returns:
         nx.Graph: Cleaned graph with artifacts removed and segments fused
                   Returns copy/empty graph on error conditions
 
     Pipeline Steps:
-        1. Input validation and parameter verification
-        2. Structure validation (required attributes)
-        3. Suspicious cycle edge removal
-        4. Artifact branch removal (with safety checks)
-        5. Linear segment fusion
-        6. Short terminal node removal
-        7. Isolated node cleanup
+        1. Remove suspicious cycle edges
+        2. Remove artifact branches (creates degree-2 nodes)
+        3. Remove short terminal nodes (creates degree-2 nodes)
+        4. Remove isolated nodes (cleanup)
+        5. Iteratively fuse linear segments until none remain
     """
     # Enhanced input validation
     if graph is None:
@@ -1229,39 +1919,288 @@ def clean_graph(
         )
         length_ratio_threshold = 1.5
 
+    # Validate and initialize statistics paths
+    if patient_stats_path is None or global_stats_path is None:
+        logger.error("Both patient_stats_path and global_stats_path are required")
+        return graph.copy()
+
+    patient_stats_path = Path(patient_stats_path)
+    global_stats_path = Path(global_stats_path)
+
+    # Initialize CSV files
+    _initialize_stats_csv(patient_stats_path)
+    if not global_stats_path.exists():
+        _initialize_stats_csv(global_stats_path)
+
+    if patient_id is None:
+        patient_id = "unknown"
+
+    # Validate cycle skeleton saving parameters
+    if save_cycle_skeletons:
+        if cycle_skeletons_dir is None:
+            logger.warning(
+                "save_cycle_skeletons=True but no cycle_skeletons_dir provided. Skipping cycle skeleton saving."
+            )
+            save_cycle_skeletons = False
+        elif reference_skeleton_path is None:
+            logger.warning(
+                "save_cycle_skeletons=True but no reference_skeleton_path provided. Skipping cycle skeleton saving."
+            )
+            save_cycle_skeletons = False
+        else:
+            cycle_skeletons_dir = Path(cycle_skeletons_dir)
+            cycle_skeletons_dir.mkdir(parents=True, exist_ok=True)
+            logger.info("Cycle skeletons will be saved to: %s", cycle_skeletons_dir)
+
+    # Load reference skeleton data if needed for cycle saving
+    skeleton_shape = None
+    skeleton_header = None
+    skeleton_affine = None
+    if save_cycle_skeletons:
+        from ..utils.io import load_niftii
+
+        skeleton_data, skeleton_header, _, skeleton_affine = load_niftii(
+            str(reference_skeleton_path), "skeleton_original"
+        )
+        skeleton_shape = skeleton_data.shape
+        logger.info("Loaded reference skeleton with shape: %s", skeleton_shape)
+
     # Make copy and track changes
     graph = graph.copy()
-    initial_stats = get_graph_stats(graph)
+
+    # Record initial state
+    previous_stats = _get_detailed_stats(graph)
+    _append_stats_to_csv(
+        patient_stats_path, patient_id, "0_initial", previous_stats, None
+    )
+    _append_stats_to_csv(
+        global_stats_path, patient_id, "0_initial", previous_stats, None
+    )
+
+    logger.info(
+        "Initial graph state: %d nodes, %d edges",
+        previous_stats["nodes"],
+        previous_stats["edges"],
+    )
 
     try:
-        # Apply cleaning pipeline with progress tracking
         logger.info("Starting graph cleaning pipeline")
 
+        # Step 1: Remove suspicious cycle edges (with cycle skeleton saving)
         logger.info("Step 1: Removing suspicious cycle edges")
-        _remove_suspicious_cycle_edges(graph)
 
+        # Detect cycles BEFORE cleaning
+        cycles_before = get_cycle_edges(graph)
+        logger.info("Found %d cycles before cleaning", len(cycles_before))
+
+        # Save cycles BEFORE cleaning
+        if save_cycle_skeletons and cycles_before:
+            from ..utils.io import save_all_cycles_skeletons
+
+            before_dir = cycle_skeletons_dir / "before_cleaning"
+            saved_before = save_all_cycles_skeletons(
+                graph=graph,
+                cycles=cycles_before,
+                reference_shape=skeleton_shape,
+                header=skeleton_header,
+                affine=skeleton_affine,
+                output_dir=str(before_dir),
+                prefix=f"{patient_id}_cycle_before",
+            )
+            logger.info("Saved %d cycle skeletons (before cleaning)", len(saved_before))
+
+        # Perform cycle edge removal and get tracking info
+        num_removed, cycle_tracking = _remove_suspicious_cycle_edges(graph)
+
+        logger.info("Removed %d suspicious edges from cycles", num_removed)
+        logger.info("Modified %d cycles (had edges removed)", len(cycle_tracking))
+
+        # Save AFTER versions: only the cycles that were modified (had edges removed)
+        if save_cycle_skeletons and cycle_tracking:
+            from ..utils.io import save_all_cycles_skeletons
+
+            after_dir = cycle_skeletons_dir / "after_cleaning"
+
+            # Extract just the remaining edges from modified cycles
+            remaining_cycles = [remaining for _, remaining in cycle_tracking]
+
+            saved_after = save_all_cycles_skeletons(
+                graph=graph,
+                cycles=remaining_cycles,
+                reference_shape=skeleton_shape,
+                header=skeleton_header,
+                affine=skeleton_affine,
+                output_dir=str(after_dir),
+                prefix=f"{patient_id}_cycle_after",
+            )
+            logger.info(
+                "Saved %d cycle skeletons (after cleaning - modified cycles only)",
+                len(saved_after),
+            )
+
+            # Log details about each modified cycle
+            for idx, (original, remaining) in enumerate(cycle_tracking):
+                logger.info(
+                    "Cycle %d: %d edges before → %d edges after (removed %d)",
+                    idx + 1,
+                    len(original),
+                    len(remaining),
+                    len(original) - len(remaining),
+                )
+        elif save_cycle_skeletons and not cycle_tracking:
+            logger.info("No cycles were modified - no 'after' skeletons to save")
+
+        current_stats = _get_detailed_stats(graph)
+        _append_stats_to_csv(
+            patient_stats_path,
+            patient_id,
+            "1_remove_cycles",
+            current_stats,
+            previous_stats,
+        )
+        _append_stats_to_csv(
+            global_stats_path,
+            patient_id,
+            "1_remove_cycles",
+            current_stats,
+            previous_stats,
+        )
+        previous_stats = current_stats
+
+        # Step 2: Remove artifact branches
         logger.info("Step 2: Removing artefact branches")
         _remove_artefact_branches(graph, radius_ratio_threshold, length_ratio_threshold)
+        current_stats = _get_detailed_stats(graph)
+        _append_stats_to_csv(
+            patient_stats_path,
+            patient_id,
+            "2_remove_branches",
+            current_stats,
+            previous_stats,
+        )
+        _append_stats_to_csv(
+            global_stats_path,
+            patient_id,
+            "2_remove_branches",
+            current_stats,
+            previous_stats,
+        )
+        previous_stats = current_stats
 
-        logger.info("Step 3: Fusing linear segments")
-        graph = fuse_linear_segments(graph)
-
-        logger.info("Step 4: Removing single neighbor nodes")
+        # Step 3: Remove short terminal nodes
+        logger.info("Step 3: Removing single neighbor nodes")
+        nodes_before = graph.number_of_nodes()
         graph = remove_single_neighbor_nodes(graph)
+        nodes_after = graph.number_of_nodes()
+        logger.info("Step 3 removed %d nodes", nodes_before - nodes_after)
+        current_stats = _get_detailed_stats(graph)
+        _append_stats_to_csv(
+            patient_stats_path,
+            patient_id,
+            "3_remove_terminals",
+            current_stats,
+            previous_stats,
+        )
+        _append_stats_to_csv(
+            global_stats_path,
+            patient_id,
+            "3_remove_terminals",
+            current_stats,
+            previous_stats,
+        )
+        previous_stats = current_stats
 
-        logger.info("Step 5: Removing isolated nodes")
+        # Step 4: Remove isolated nodes
+        logger.info("Step 4: Removing isolated nodes")
         remove_isolated_nodes(graph)
+        current_stats = _get_detailed_stats(graph)
+        _append_stats_to_csv(
+            patient_stats_path,
+            patient_id,
+            "4_remove_isolated",
+            current_stats,
+            previous_stats,
+        )
+        _append_stats_to_csv(
+            global_stats_path,
+            patient_id,
+            "4_remove_isolated",
+            current_stats,
+            previous_stats,
+        )
+        previous_stats = current_stats
 
-        final_stats = get_graph_stats(graph)
-        nodes_removed = initial_stats["nodes"] - final_stats["nodes"]
-        edges_removed = initial_stats["edges"] - final_stats["edges"]
+        # Step 5: Iteratively fuse linear segments until none remain
+        fusion_pass = 1
+        max_fusion_passes = 10  # Safety limit to prevent infinite loops
 
-        if nodes_removed > 0 or edges_removed > 0:
+        while current_stats["linear"] > 0 and fusion_pass <= max_fusion_passes:
             logger.info(
-                "Cleaning complete: removed %d nodes, %d edges",
-                nodes_removed,
-                edges_removed,
+                "Step 5.%d: Fusing linear segments (pass %d, %d linear nodes remaining)",
+                fusion_pass,
+                fusion_pass,
+                current_stats["linear"],
             )
+
+            # Store state before fusion
+            nodes_before = current_stats["nodes"]
+            linear_before = current_stats["linear"]
+
+            # Perform fusion
+            graph = fuse_linear_segments(graph)
+            current_stats = _get_detailed_stats(graph)
+
+            # Log this fusion pass
+            step_name = f"5_fuse_linear_pass_{fusion_pass}"
+            _append_stats_to_csv(
+                patient_stats_path, patient_id, step_name, current_stats, previous_stats
+            )
+            _append_stats_to_csv(
+                global_stats_path, patient_id, step_name, current_stats, previous_stats
+            )
+            previous_stats = current_stats
+
+            # Check if we made progress
+            if current_stats["linear"] >= linear_before:
+                logger.warning(
+                    "Fusion pass %d did not reduce linear nodes (%d -> %d). Stopping iteration.",
+                    fusion_pass,
+                    linear_before,
+                    current_stats["linear"],
+                )
+                break
+
+            fusion_pass += 1
+
+        # Final status check
+        if current_stats["linear"] > 0:
+            if fusion_pass > max_fusion_passes:
+                logger.error(
+                    "Reached maximum fusion passes (%d) with %d linear nodes remaining. "
+                    "This may indicate a bug in the fusion logic.",
+                    max_fusion_passes,
+                    current_stats["linear"],
+                )
+            else:
+                logger.warning(
+                    "Completed fusion after %d passes, but %d linear nodes still remain. "
+                    "These may be part of complex cycles or edge cases.",
+                    fusion_pass - 1,
+                    current_stats["linear"],
+                )
+        else:
+            logger.info(
+                "Successfully fused all linear segments after %d passes",
+                fusion_pass - 1,
+            )
+
+        logger.info(
+            "Final graph state: %d nodes, %d edges",
+            current_stats["nodes"],
+            current_stats["edges"],
+        )
+        logger.info("Patient statistics saved to: %s", patient_stats_path)
+        logger.info("Global statistics updated: %s", global_stats_path)
 
     except Exception as e:
         logger.error("Error during graph cleaning: %s", e)

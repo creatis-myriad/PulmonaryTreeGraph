@@ -50,7 +50,7 @@ def save_mask(
     - path: The file path where the mask will be saved.
     """
     # Convert floating point data to integer to avoid truncation warning
-    if np.issubdtype(data.dtype, np.floating):
+    if np.issubdtype(data.dtype, np.floating) and "distance_map" not in mask_name:
         # Round to nearest integer instead of truncating
         data = np.round(data).astype(np.uint8)
         logger.debug("Converted floating point data to integer type")
@@ -217,10 +217,6 @@ def save_graph(graph, path: str) -> None:
             # Will raise NetworkXNoCycle if no cycle is found
             cycle = nx.find_cycle(graph, orientation="original")
             logger.warning("Graph contains a cycle (directed): %s", cycle)
-            logger.debug(
-                "Node positions (for debugging): %s",
-                {node: data["pos"] for node, data in graph.nodes(data=True)},
-            )
 
         except nx.exception.NetworkXNoCycle:
             logger.info("Graph is directed and has no cycles")
@@ -229,10 +225,7 @@ def save_graph(graph, path: str) -> None:
             # Will raise NetworkXNoCycle if no cycle is found
             cycle = nx.find_cycle(graph)
             logger.warning("Graph contains a cycle (undirected): %s", cycle)
-            logger.debug(
-                "Node positions (for debugging): %s",
-                {node: data["pos"] for node, data in graph.nodes(data=True)},
-            )
+
         except nx.exception.NetworkXNoCycle:
             logger.info("Graph is undirected and has no cycles")
 
@@ -395,11 +388,20 @@ def recreate_skeleton_from_graph(graph: nx.Graph, reference_shape: tuple) -> np.
         try:
             # Will raise NetworkXNoCycle if no cycle is found
             cycle = nx.find_cycle(graph, orientation="original")
-            logger.warning("Graph contains a cycle (directed): %s", cycle)
-            logger.debug(
-                "Node positions (for debugging): %s",
-                {node: data["pos"] for node, data in graph.nodes(data=True)},
+
+            # Extract cycle information with positions
+            cycle_nodes = set()
+            for edge in cycle:
+                cycle_nodes.add(edge[0])
+                cycle_nodes.add(edge[1])
+
+            logger.warning("Graph contains a cycle (directed)")
+            logger.warning(
+                "Cycle has %d edges involving %d nodes", len(cycle), len(cycle_nodes)
             )
+
+            # Summary of all nodes involved
+            logger.warning("All nodes in cycle: %s", sorted(cycle_nodes))
 
         except nx.exception.NetworkXNoCycle:
             logger.info("Graph is directed and has no cycles")
@@ -407,11 +409,21 @@ def recreate_skeleton_from_graph(graph: nx.Graph, reference_shape: tuple) -> np.
         try:
             # Will raise NetworkXNoCycle if no cycle is found
             cycle = nx.find_cycle(graph)
-            logger.warning("Graph contains a cycle (undirected): %s", cycle)
-            logger.debug(
-                "Node positions (for debugging): %s",
-                {node: data["pos"] for node, data in graph.nodes(data=True)},
+
+            # Extract unique nodes in cycle
+            cycle_nodes = set()
+            for edge in cycle:
+                cycle_nodes.add(edge[0])
+                cycle_nodes.add(edge[1])
+
+            logger.warning("Graph contains a cycle (undirected)")
+            logger.warning(
+                "Cycle has %d edges involving %d nodes", len(cycle), len(cycle_nodes)
             )
+
+            # Summary of all nodes involved
+            logger.warning("All nodes in cycle: %s", sorted(cycle_nodes))
+
         except nx.exception.NetworkXNoCycle:
             logger.info("Graph is undirected and has no cycles")
 
@@ -1391,3 +1403,129 @@ def validate_vessel_processing_inputs(
     except (ValueError, TypeError, OSError) as e:
         logger.error("Error validating inputs: %s", e)
         return False
+
+
+def save_cycle_skeleton_from_graph(
+    graph: nx.Graph,
+    cycle_edges: list[tuple[int, int]],
+    reference_shape: tuple,
+    header,
+    affine,
+    output_path: str,
+    mask_name: str = "cycle_skeleton",
+) -> None:
+    """
+    Save a skeleton containing only the edges involved in a cycle, colored by edge ID.
+
+    Parameters:
+    - graph: NetworkX graph containing edge data
+    - cycle_edges: List of edge tuples (node1, node2) that form the cycle
+    - reference_shape: Shape for the output skeleton
+    - header: NIfTI header
+    - affine: Affine transformation matrix
+    - output_path: Where to save the cycle skeleton
+    - mask_name: Name for validation logging
+    """
+    # Create empty skeleton with uint32 to support edge IDs
+    cycle_skeleton = np.zeros(reference_shape, dtype=np.uint32)
+
+    # Fill skeleton with cycle edges, colored by edge ID
+    for u, v in cycle_edges:
+        # Get edge data (handle both directions)
+        edge_data = None
+        if graph.has_edge(u, v):
+            edge_data = graph.edges[u, v]
+        elif graph.has_edge(v, u):
+            edge_data = graph.edges[v, u]
+
+        if edge_data and "centerline" in edge_data:
+            centerline = edge_data["centerline"]
+            edge_id = edge_data.get("id", 1)  # Get edge ID, default to 1
+
+            if isinstance(centerline, np.ndarray):
+                points = centerline
+            else:
+                points = np.array(centerline)
+
+            # Mark all points in the centerline with the edge ID
+            for point in points:
+                x, y, z = int(point[0]), int(point[1]), int(point[2])
+                if (
+                    0 <= x < cycle_skeleton.shape[0]
+                    and 0 <= y < cycle_skeleton.shape[1]
+                    and 0 <= z < cycle_skeleton.shape[2]
+                ):
+                    cycle_skeleton[x, y, z] = edge_id
+
+            logger.debug("Colored cycle edge (%d, %d) with ID %d", u, v, edge_id)
+
+    # Save the cycle skeleton with appropriate data type
+    header_copy = header.copy()
+    max_edge_id = np.max(cycle_skeleton)
+
+    # Choose appropriate data type based on max edge ID
+    if max_edge_id <= 255:
+        header_copy.set_data_dtype(np.uint8)
+        cycle_skeleton = cycle_skeleton.astype(np.uint8)
+    elif max_edge_id <= 65535:
+        header_copy.set_data_dtype(np.uint16)
+        cycle_skeleton = cycle_skeleton.astype(np.uint16)
+    else:
+        header_copy.set_data_dtype(np.uint32)
+
+    save_mask(cycle_skeleton, header_copy, affine, output_path, mask_name=mask_name)
+
+    unique_ids = np.unique(cycle_skeleton[cycle_skeleton > 0])
+    logger.info("Saved cycle skeleton to: %s", output_path)
+    logger.info(
+        "Cycle skeleton contains %d voxels with %d unique edge IDs: %s",
+        np.sum(cycle_skeleton > 0),
+        len(unique_ids),
+        list(unique_ids),
+    )
+
+
+def save_all_cycles_skeletons(
+    graph: nx.Graph,
+    cycles: list[list[tuple[int, int]]],
+    reference_shape: tuple,
+    header,
+    affine,
+    output_dir: str,
+    prefix: str = "cycle",
+) -> list[str]:
+    """
+    Save individual skeleton files for each cycle detected.
+
+    Parameters:
+    - graph: NetworkX graph containing edge data
+    - cycles: List of cycles, where each cycle is a list of edges
+    - reference_shape: Shape for output skeletons
+    - header: NIfTI header
+    - affine: Affine transformation matrix
+    - output_dir: Directory to save cycle skeletons
+    - prefix: Prefix for output files (e.g., "cycle_before", "cycle_after")
+
+    Returns:
+    - List of saved file paths
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    saved_paths = []
+
+    for i, cycle_edges in enumerate(cycles):
+        output_path = os.path.join(output_dir, f"{prefix}_{i+1}.nii.gz")
+
+        save_cycle_skeleton_from_graph(
+            graph=graph,
+            cycle_edges=cycle_edges,
+            reference_shape=reference_shape,
+            header=header,
+            affine=affine,
+            output_path=output_path,
+            mask_name=f"{prefix}_{i+1}",
+        )
+
+        saved_paths.append(output_path)
+
+    logger.info("Saved %d cycle skeletons to: %s", len(cycles), output_dir)
+    return saved_paths

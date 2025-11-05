@@ -5,7 +5,9 @@ This module provides functions to convert binary masks into skeletons and then i
 NetworkX graphs representing the vascular tree structure.
 """
 
+import csv
 import logging
+from pathlib import Path
 
 import networkx as nx
 import numpy as np
@@ -14,13 +16,137 @@ from skan.csr import skeleton_to_csgraph
 
 logger = logging.getLogger(__name__)
 
+_initialized_global_csvs = (
+    set()
+)  # Track which global CSVs have been initialized this run
+
+# =============================================================================
+# STATISTICS TRACKING FOR CONSTRUCTION
+# =============================================================================
+
+
+def _initialize_construction_stats_csv(output_path: Path, force: bool = False) -> None:
+    """Create CSV file with header for construction statistics.
+
+    Args:
+        output_path: Path to CSV file
+        force: If True, always recreate the file. If False, only create if not exists.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Delete existing file if force=True
+    if force and output_path.exists():
+        output_path.unlink()
+        logger.debug("Deleted existing CSV file: %s", output_path)
+
+    with open(output_path, "w", newline="") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(
+            [
+                "patient_id",
+                "step",
+                "nodes",
+                "edges",
+                "components",
+                "terminals",
+                "bifurcations",
+                "linear",
+                "isolated",
+                "cycles",
+                "voxel_coverage",
+            ]
+        )
+    logger.debug("Created CSV file: %s", output_path)
+
+
+def _get_construction_stats(
+    graph: nx.Graph, original_skeleton: np.ndarray | None = None
+) -> dict:
+    """Calculate detailed graph statistics during construction."""
+    stats = {
+        "nodes": graph.number_of_nodes(),
+        "edges": graph.number_of_edges(),
+        "components": nx.number_connected_components(graph),
+        "terminals": 0,
+        "bifurcations": 0,
+        "linear": 0,
+        "isolated": 0,
+        "cycles": len(nx.cycle_basis(graph)) if graph.number_of_edges() > 0 else 0,
+        "voxel_coverage": 0.0,
+    }
+
+    # Count node types
+    for node in graph.nodes:
+        degree = graph.degree(node)
+        if degree == 0:
+            stats["isolated"] += 1
+        elif degree == 1:
+            stats["terminals"] += 1
+        elif degree == 2:
+            stats["linear"] += 1
+        else:
+            stats["bifurcations"] += 1
+
+    # Calculate voxel coverage if original skeleton provided
+    if original_skeleton is not None:
+        original_voxel_count = np.sum(original_skeleton > 0)
+        if original_voxel_count > 0:
+            covered_voxels = set()
+
+            for _, _, data in graph.edges(data=True):
+                centerline = data.get("centerline", [])
+                for pos in centerline:
+                    voxel_pos = tuple(int(round(coord)) for coord in pos)
+                    if (
+                        0 <= voxel_pos[0] < original_skeleton.shape[0]
+                        and 0 <= voxel_pos[1] < original_skeleton.shape[1]
+                        and 0 <= voxel_pos[2] < original_skeleton.shape[2]
+                    ):
+                        covered_voxels.add(voxel_pos)
+
+            stats["voxel_coverage"] = (len(covered_voxels) / original_voxel_count) * 100
+
+    return stats
+
+
+def _append_construction_stats_to_csv(
+    output_path: Path,
+    patient_id: str,
+    step: str,
+    stats: dict,
+) -> None:
+    """Append construction statistics row to CSV file."""
+    with open(output_path, "a", newline="") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(
+            [
+                patient_id,
+                step,
+                stats["nodes"],
+                stats["edges"],
+                stats["components"],
+                stats["terminals"],
+                stats["bifurcations"],
+                stats["linear"],
+                stats["isolated"],
+                stats["cycles"],
+                f"{stats['voxel_coverage']:.2f}",
+            ]
+        )
+
+
 # =============================================================================
 # PIXEL-LEVEL GRAPH CONSTRUCTION
 # =============================================================================
 
 
 def skeleton_to_graph(
-    skeleton: np.ndarray, distance_map: np.ndarray, spacing: tuple[float, float, float]
+    skeleton: np.ndarray,
+    distance_map: np.ndarray,
+    spacing: tuple[float, float, float],
+    patient_id: str | None = None,
+    patient_stats_path: Path | None = None,
+    global_stats_path: Path | None = None,
 ) -> nx.Graph:
     """
     Convert a skeleton (binary 3D array) to a pixel-level NetworkX graph.
@@ -63,10 +189,41 @@ def skeleton_to_graph(
 
     # Add node attributes: position and radius
     pixel_coordinates = np.asarray(pixel_coordinates).T
+
     for node_id in graph.nodes:
         pos = pixel_coordinates[node_id].tolist()
         graph.nodes[node_id]["pos"] = pos
-        graph.nodes[node_id]["radius"] = distance_map[pos[0], pos[1], pos[2]]
+        # Store radius directly from distance_map, converting to Python float to preserve precision
+        radius_val = distance_map[pos[0], pos[1], pos[2]]
+        graph.nodes[node_id]["radius"] = float(radius_val) if radius_val > 0 else 1e-6
+
+    # Track statistics with voxel coverage calculation for pixel graph
+    if patient_stats_path and patient_id:
+        # Calculate voxel coverage for pixel graph
+        # Since pixel graph nodes ARE the skeleton voxels, coverage should be ~100%
+        covered_voxels = set()
+        for node_id in graph.nodes:
+            pos = graph.nodes[node_id]["pos"]
+            voxel_pos = tuple(int(round(coord)) for coord in pos)
+            covered_voxels.add(voxel_pos)
+
+        original_voxel_count = np.sum(skeleton > 0)
+        voxel_coverage = (
+            (len(covered_voxels) / original_voxel_count * 100)
+            if original_voxel_count > 0
+            else 0.0
+        )
+
+        stats = _get_construction_stats(graph)
+        stats["voxel_coverage"] = voxel_coverage
+
+        _append_construction_stats_to_csv(
+            patient_stats_path, patient_id, "1_pixel_graph", stats
+        )
+        if global_stats_path:
+            _append_construction_stats_to_csv(
+                global_stats_path, patient_id, "1_pixel_graph", stats
+            )
 
     return graph
 
@@ -175,6 +332,7 @@ def follow_path(
     # Initialize with first segment
     centerline, radius, total_length = get_edge_data(graph, start, neighbor)
     current, prev = neighbor, start
+    visited.add((start, neighbor))  # Mark the first segment as visited immediately
 
     # Follow path until reaching next endpoint/branch point
     while not is_path_endpoint(graph, current):
@@ -194,17 +352,19 @@ def follow_path(
         total_length += length
 
         # Mark edge as visited and advance
-        visited.add((prev, current))
+        visited.add((current, next_node))
         prev, current = current, next_node
 
-    # Ensure path ends at the final node position
+    # The loop terminates when 'current' is the endpoint.
+    # The centerline should naturally end at this point.
     final_pos = graph.nodes[current]["pos"]
     if not np.array_equal(centerline[-1], final_pos):
+        # This indicates a discrepancy, but for robustness, we append the correct final position.
+        logger.debug(
+            "Correcting centerline end: appending final node %d position", current
+        )
         centerline.append(final_pos)
         radius.append(graph.nodes[current].get("radius", 0.0))
-
-    # Mark final edge as visited
-    visited.add((prev, current))
 
     return current, centerline, radius, total_length
 
@@ -214,9 +374,15 @@ def follow_path(
 # =============================================================================
 
 
-def create_branch_graph(graph: nx.Graph) -> nx.Graph:
+def create_branch_graph(
+    graph: nx.Graph,
+    patient_id: str | None = None,
+    patient_stats_path: Path | None = None,
+    global_stats_path: Path | None = None,
+    original_skeleton: np.ndarray | None = None,
+) -> nx.Graph:
     """
-    Transform pixel-level graph into branch-level graph representation.
+    Transform pixel-level graph into branch-level graph representation with statistics tracking.
 
     Consolidates linear path segments into single edges connecting anatomically
     significant nodes (terminals and branch points). Preserves all geometric
@@ -231,8 +397,8 @@ def create_branch_graph(graph: nx.Graph) -> nx.Graph:
 
     Algorithm:
         1. Identify all endpoint and branch point nodes
-        2. For each significant node and each of its neighbors:
-           - Follow the linear path to the next significant node
+        2. For each edge in the original graph:
+           - If not yet visited, follow the linear path to the next significant node
            - Accumulate geometric properties along the path
            - Create single edge representing the entire vessel segment
         3. Track visited edges to avoid duplication
@@ -250,56 +416,144 @@ def create_branch_graph(graph: nx.Graph) -> nx.Graph:
     edge_counter = 1
     visited = set()
 
-    logger.info("Branch graph created with %d nodes", branches_graph.number_of_nodes())
-
     # Identify all anatomically significant nodes (terminals and branch points)
     endpoints = [n for n in graph.nodes() if is_path_endpoint(graph, n)]
     logger.info("Found %d endpoints/branch points", len(endpoints))
 
-    # Process each significant node
-    for i, start_node in enumerate(endpoints):
-        if i > 0 and i % 100 == 0:
-            logger.debug("Processed %d/%d endpoints", i, len(endpoints))
+    # Process all edges in the graph to ensure complete coverage
+    total_edges = graph.number_of_edges()
+    processed_edges = 0
 
-        # Follow path to each neighbor
-        for neighbor in graph.neighbors(start_node):
-            # Skip if this edge pair already processed
-            if (start_node, neighbor) in visited or (neighbor, start_node) in visited:
-                continue
+    for path_start_node, path_start_neighbor in graph.edges():
+        # Skip if this edge pair already processed
+        if (path_start_node, path_start_neighbor) in visited or (
+            path_start_neighbor,
+            path_start_node,
+        ) in visited:
+            continue
 
-            # Follow path to next significant node
-            end_node, centerline, radius, length = follow_path(
-                graph, start_node, neighbor, visited
+        processed_edges += 1
+        if processed_edges % 1000 == 0:
+            logger.debug("Processed %d/%d edges", processed_edges, total_edges)
+
+        # These are the final start/end nodes of the new branch edge
+        final_start_node = path_start_node
+
+        # Determine direction and follow the path
+        if is_path_endpoint(graph, path_start_node) and not is_path_endpoint(
+            graph, path_start_neighbor
+        ):
+            final_end_node, centerline, radius, length = follow_path(
+                graph, path_start_node, path_start_neighbor, visited
+            )
+        elif is_path_endpoint(graph, path_start_neighbor) and not is_path_endpoint(
+            graph, path_start_node
+        ):
+            # The path starts from the neighbor, so we swap
+            final_start_node = path_start_neighbor
+            final_end_node, centerline, radius, length = follow_path(
+                graph, path_start_neighbor, path_start_node, visited
+            )
+        else:
+            # For intermediate-to-intermediate paths, follow from the first node
+            final_end_node, centerline, radius, length = follow_path(
+                graph, path_start_node, path_start_neighbor, visited
             )
 
-            # Add both endpoint nodes to branch graph
-            for node in (start_node, end_node):
+        # Add both endpoint nodes to branch graph
+        for node in (final_start_node, final_end_node):
+            if node not in branches_graph:
                 branches_graph.add_node(
                     node,
                     pos=graph.nodes[node]["pos"],
                     radius=graph.nodes[node].get("radius", 0.0),
                 )
 
-            # Create edge with all geometric properties
-            branches_graph.add_edge(
-                start_node,
-                end_node,
-                id=edge_counter,  # Assign ID starting from 1
-                name=f"edge_{edge_counter}",
-                centerline=centerline,
-                radius=radius,
-                length=length,
-                min_radius=min(radius),
-                max_radius=max(radius),
-                mean_radius=float(np.mean(radius)) if radius else 0.0,
-            )
-            edge_counter += 1
+        # Orient centerline to flow from final_start_node to final_end_node
+        if len(centerline) > 0:
+            centerline_array = np.asarray(centerline)
+            start_pos = np.array(graph.nodes[final_start_node]["pos"])
+            end_pos = np.array(graph.nodes[final_end_node]["pos"])
+
+            first_point = centerline_array[0]
+            last_point = centerline_array[-1]
+
+            # Check if centerline flows from start to end
+            first_matches_start = np.array_equal(first_point, start_pos)
+            last_matches_end = np.array_equal(last_point, end_pos)
+
+            if not (first_matches_start and last_matches_end):
+                # Check if it's reversed
+                first_matches_end = np.array_equal(first_point, end_pos)
+                last_matches_start = np.array_equal(last_point, start_pos)
+
+                if first_matches_end and last_matches_start:
+                    # Reverse centerline and radius to match edge direction
+                    logger.debug(
+                        "Reversing centerline for edge %d->%d (ID %d)",
+                        final_start_node,
+                        final_end_node,
+                        edge_counter,
+                    )
+                    centerline = list(reversed(centerline))
+                    radius = list(reversed(radius))
+                else:
+                    # This warning should now only trigger for genuine issues
+                    logger.warning(
+                        "Ambiguous centerline orientation for edge %d->%d (ID %d)",
+                        final_start_node,
+                        final_end_node,
+                        edge_counter,
+                    )
+                    logger.debug("  Start node %d pos: %s", final_start_node, start_pos)
+                    logger.debug("  End node %d pos: %s", final_end_node, end_pos)
+                    logger.debug("  Centerline first point: %s", first_point)
+                    logger.debug("  Centerline last point: %s", last_point)
+                    logger.debug("  Centerline length: %d points", len(centerline))
+                    # Check comparison results
+                    logger.debug("  first_matches_start: %s", first_matches_start)
+                    logger.debug("  last_matches_end: %s", last_matches_end)
+                    logger.debug("  first_matches_end: %s", first_matches_end)
+                    logger.debug("  last_matches_start: %s", last_matches_start)
+                    # Show a few centerline points for context
+                    if len(centerline) > 2:
+                        logger.debug("  First 3 centerline points: %s", centerline[:3])
+                        logger.debug("  Last 3 centerline points: %s", centerline[-3:])
+
+        # Create edge with all geometric properties
+        branches_graph.add_edge(
+            final_start_node,
+            final_end_node,
+            id=edge_counter,
+            name=f"edge_{edge_counter}",
+            centerline=centerline,
+            radius=radius,
+            length=length,
+            min_radius=min(radius) if radius else 0.0,
+            max_radius=max(radius) if radius else 0.0,
+            mean_radius=np.mean(radius).item() if radius else 0.0,
+        )
+        edge_counter += 1
 
     logger.info(
         "Branch graph created with %d nodes and %d edges",
         branches_graph.number_of_nodes(),
         branches_graph.number_of_edges(),
     )
+
+    # Verify that all edges were processed
+    logger.info("Processed %d out of %d original edges", processed_edges, total_edges)
+
+    # Track statistics
+    if patient_stats_path and patient_id:
+        stats = _get_construction_stats(branches_graph, original_skeleton)
+        _append_construction_stats_to_csv(
+            patient_stats_path, patient_id, "2_branch_graph", stats
+        )
+        if global_stats_path:
+            _append_construction_stats_to_csv(
+                global_stats_path, patient_id, "2_branch_graph", stats
+            )
 
     return branches_graph
 
@@ -389,7 +643,12 @@ def verify_voxel_coverage(
 
 
 def mask_to_branch_graph(
-    skeleton: np.ndarray, spacing, distance_map: np.ndarray
+    skeleton: np.ndarray,
+    spacing,
+    distance_map: np.ndarray,
+    patient_id: str | None = None,
+    patient_stats_path: Path | None = None,
+    global_stats_path: Path | None = None,
 ) -> nx.Graph:
     """
     Main entry point that orchestrates the complete conversion process
@@ -410,22 +669,47 @@ def mask_to_branch_graph(
         4. Verify voxel coverage against original skeleton
         5. Return final branch graph
     """
+    # Initialize stats CSVs if provided
+    if patient_id and patient_stats_path:
+        _initialize_construction_stats_csv(patient_stats_path, force=True)
+
+    # For global CSV: only initialize once per Python session
+    if patient_id and global_stats_path:
+        global_path_str = str(global_stats_path.resolve())
+
+        if global_path_str not in _initialized_global_csvs:
+            # First time seeing this path - initialize it
+            _initialize_construction_stats_csv(global_stats_path, force=True)
+            _initialized_global_csvs.add(global_path_str)
+            logger.info(
+                "Initialized global construction stats CSV: %s", global_stats_path
+            )
+
     # Log original skeleton voxel count
     skeleton_voxel_count = np.sum(skeleton > 0)
     logger.info("Original skeleton contains %d voxels", skeleton_voxel_count)
 
-    # Convert skeleton to pixel-level graph
-    pixel_graph = skeleton_to_graph(skeleton, distance_map, spacing)
+    # Convert skeleton to pixel-level graph (will track its own stats with voxel coverage)
+    pixel_graph = skeleton_to_graph(
+        skeleton,
+        distance_map,
+        spacing,
+        patient_id,
+        patient_stats_path,
+        global_stats_path,
+    )
     logger.info(
         "Pixel graph contains %d nodes, %d edges",
         pixel_graph.number_of_nodes(),
         pixel_graph.number_of_edges(),
     )
 
-    # Create branch-level graph from pixel graph
-    branch_graph = create_branch_graph(pixel_graph)
+    # Create branch-level graph from pixel graph (will track its own stats with voxel coverage)
+    branch_graph = create_branch_graph(
+        pixel_graph, patient_id, patient_stats_path, global_stats_path, skeleton
+    )
 
-    # Verify voxel coverage against original skeleton
+    # Verify voxel coverage against original skeleton (for logging only)
     verify_voxel_coverage(branch_graph, skeleton)
 
     return branch_graph
