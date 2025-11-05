@@ -870,15 +870,9 @@ def _get_radius_pattern_ratios(
     Returns:
         tuple: (decrease_ratio, increase_ratio) if suspicious, None otherwise
 
-    Detection criteria:
-        - STRICT (threshold >= 0.5): Both ratios >= threshold_factor
-        - RELAXED (threshold < 0.5): Uses multiple criteria:
-          1. Both ratios >= threshold_factor (original criterion)
-          2. OR combined score >= 0.7 AND pattern is balanced (balance_score >= 0.6)
-
-    Balance score measures symmetry: min(decrease, increase) / max(decrease, increase)
-    A balanced pattern (both decrease and increase significant) indicates fusion artifact.
-    An unbalanced pattern (one very strong) indicates normal anatomical variation.
+    Simple two-threshold approach:
+        - PASS 1 (threshold = 0.5): Both ratios >= 0.5
+        - PASS 2 (threshold = 0.4): Both ratios >= 0.4
     """
     try:
         # Reuse existing logic from detect_radius_pattern but return ratios
@@ -966,73 +960,17 @@ def _get_radius_pattern_ratios(
 
         decrease_ratio = (max_before - min_value) / max_before
         increase_ratio = (max_after - min_value) / min_value
-        combined_score = decrease_ratio + increase_ratio
-
-        # Calculate balance score: how symmetric is the pattern?
-        # 1.0 = perfectly balanced, 0.0 = completely unbalanced
-        balance_score = (
-            min(decrease_ratio, increase_ratio) / max(decrease_ratio, increase_ratio)
-            if max(decrease_ratio, increase_ratio) > 0
-            else 0
-        )
 
         logger.debug(
-            "Calculated ratios: decrease=%.3f, increase=%.3f, combined=%.3f, balance=%.3f",
+            "Calculated ratios: decrease=%.3f, increase=%.3f",
             decrease_ratio,
             increase_ratio,
-            combined_score,
-            balance_score,
         )
 
-        # MODIFIED DETECTION LOGIC:
-        # For strict threshold (0.5): require both ratios >= 0.5 (original behavior)
-        # For relaxed threshold (0.4): prioritize balanced patterns (fusion artifacts)
-
-        if threshold_factor >= 0.5:
-            # Strict mode: both ratios must exceed threshold
-            if (
-                decrease_ratio >= threshold_factor
-                and increase_ratio >= threshold_factor
-            ):
-                logger.debug("STRICT detection: both ratios >= %.3f", threshold_factor)
-                return decrease_ratio, increase_ratio
-        else:
-            # Relaxed mode: detect balanced patterns that suggest fusion artifacts
-            min_combined_score = 0.7  # Require combined score >= 0.7
-            min_balance_score = 0.6  # Require balance >= 0.6 (reasonably symmetric)
-
-            # Criterion 1: Both ratios meet threshold (original)
-            if (
-                decrease_ratio >= threshold_factor
-                and increase_ratio >= threshold_factor
-            ):
-                logger.debug("RELAXED detection: both ratios >= %.3f", threshold_factor)
-                return decrease_ratio, increase_ratio
-
-            # Criterion 2: Good combined score AND balanced pattern (NEW)
-            # This catches fusion artifacts where both decrease and increase are significant
-            # but one might be slightly below threshold
-            elif (
-                combined_score >= min_combined_score
-                and balance_score >= min_balance_score
-            ):
-                logger.debug(
-                    "RELAXED detection (balanced pattern): combined=%.3f >= %.3f, balance=%.3f >= %.3f",
-                    combined_score,
-                    min_combined_score,
-                    balance_score,
-                    min_balance_score,
-                )
-                return decrease_ratio, increase_ratio
-
-            # Unbalanced patterns (one ratio very strong, other weak) are NOT detected
-            # This preserves edges like 183 with decrease=0.673, increase=0.229, balance=0.34
-            else:
-                logger.debug(
-                    "NOT detected: combined=%.3f, balance=%.3f (unbalanced pattern - likely anatomical)",
-                    combined_score,
-                    balance_score,
-                )
+        # SIMPLE TWO-PASS LOGIC
+        if decrease_ratio >= threshold_factor and increase_ratio >= threshold_factor:
+            logger.debug("Detection: both ratios >= %.3f", threshold_factor)
+            return decrease_ratio, increase_ratio
 
         return None
 
@@ -1150,7 +1088,7 @@ def _remove_suspicious_cycle_edges(
         # Two-pass approach: radius patterns (0.5), then relaxed radius (0.4)
         pass_configs = [
             {"type": "radius", "threshold": 0.5, "name": "radius pattern (strict)"},
-            {"type": "radius", "threshold": 0.4, "name": "radius pattern (relaxed)"},
+            {"type": "radius", "threshold": 0.4, "name": "radius pattern (moderate)"},
         ]
 
         for pass_number, config in enumerate(pass_configs, 1):
