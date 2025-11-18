@@ -877,6 +877,7 @@ def _get_radius_pattern_ratios(
     try:
         # Reuse existing logic from detect_radius_pattern but return ratios
         if radius_list is None:
+            logger.debug("Radius list is None")
             return None
 
         # Handle numpy arrays specifically
@@ -919,6 +920,7 @@ def _get_radius_pattern_ratios(
             radius_array = radius_array.flatten()
 
         if radius_array.size < 3:
+            logger.debug("Insufficient data points (found %d)", radius_array.size)
             return None
 
         # Check if we have valid numeric data
@@ -927,6 +929,7 @@ def _get_radius_pattern_ratios(
 
         # Check for NaN or infinite values
         if not np.isfinite(radius_array).all():
+            logger.debug("Found NaN or infinite values")
             return None
 
         # Calculate min and its index
@@ -940,6 +943,11 @@ def _get_radius_pattern_ratios(
 
         # Check if minimum is at the endpoints (normal case)
         if min_idx == 0 or min_idx == len(radius_array) - 1:
+            logger.debug(
+                "Minimum at endpoint (index %d of %d) - skipping (normal tapering)",
+                min_idx,
+                len(radius_array),
+            )
             return None
 
         # Calculate ratios
@@ -956,6 +964,11 @@ def _get_radius_pattern_ratios(
 
         # Avoid division by zero
         if max_before <= 0 or min_value <= 0:
+            logger.debug(
+                "Invalid radius values: max_before=%.3f, min_value=%.3f",
+                max_before,
+                min_value,
+            )
             return None
 
         decrease_ratio = (max_before - min_value) / max_before
@@ -971,6 +984,13 @@ def _get_radius_pattern_ratios(
         if decrease_ratio >= threshold_factor and increase_ratio >= threshold_factor:
             logger.debug("Detection: both ratios >= %.3f", threshold_factor)
             return decrease_ratio, increase_ratio
+        else:
+            logger.debug(
+                "NOT detected: decrease %.3f, increase %.3f (threshold %.3f)",
+                decrease_ratio,
+                increase_ratio,
+                threshold_factor,
+            )
 
         return None
 
