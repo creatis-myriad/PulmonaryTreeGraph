@@ -689,6 +689,16 @@ def label_vessel_graph(
 
     os.makedirs(output_dir, exist_ok=True)
 
+    # Extract patient_id from output directory
+    patient_id = os.path.basename(output_dir)
+
+    # Define statistics paths automatically
+    patient_stats_path = Path(output_dir) / "graph_labelling_stats.csv"
+
+    # Global stats at the root of results directory
+    results_base_dir = os.path.dirname(output_dir)
+    global_stats_path = Path(results_base_dir) / "global_labelling_stats.csv"
+
     logger.info("Loading graph: %s", graph_path)
     graph = load_graph(graph_path)
 
@@ -724,13 +734,18 @@ def label_vessel_graph(
     logger.info("Successfully loaded %d/%d masks", len(lungs_dict), len(mask_files))
 
     logger.info("Labeling graph...")
+    logger.info("Patient statistics will be saved to: %s", patient_stats_path)
+    logger.info("Global statistics will be saved to: %s", global_stats_path)
+
     labeled_graph = label_graph(
         graph,
         lungs_dict,
         diameter_threshold=diameter_threshold,
         length_threshold=length_threshold,
+        patient_id=patient_id,
+        patient_stats_path=patient_stats_path,
+        global_stats_path=global_stats_path,
     )
-
     logger.info(
         "Labeled graph: %d nodes, %d edges",
         len(labeled_graph.nodes),
@@ -890,6 +905,8 @@ def label_vessel_graph(
         "skeleton_paths": skeleton_paths,
         "volume_paths": volume_paths,
         "graph_object": labeled_graph,
+        "patient_stats_path": str(patient_stats_path),
+        "global_stats_path": str(global_stats_path),
     }
 
 

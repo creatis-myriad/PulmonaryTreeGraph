@@ -9,8 +9,10 @@ lobar vessels as level 3, segmental vessels as level 4, and subsequent branches 
 Vessels connecting multiple lobes are marked as interlobar.
 """
 
+import csv
 import logging
 from collections import defaultdict, deque
+from pathlib import Path
 
 import networkx as nx
 
@@ -68,6 +70,196 @@ def _is_unknown_lobe(lobe_data) -> bool:
         )
     else:
         return lobe_data == "unknown"
+
+
+# =============================================================================
+# STATISTICS TRACKING FUNCTIONS
+# =============================================================================
+
+
+def _initialize_labelling_stats_csv(output_path: Path) -> None:
+    """Create CSV file with header for labelling statistics."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(output_path, "w", newline="") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(
+            [
+                "patient",
+                "RUL",
+                "RML",
+                "RLL",
+                "LUL",
+                "LLL",
+                "interlobar",
+                "unknown",
+                "total_chains",
+                "level4_edges",
+            ]
+        )
+
+
+def _extract_patient_id(patient_id_input: str) -> str:
+    """
+    Extract 4-digit patient ID from various input formats.
+
+    Args:
+        patient_id_input: Patient identifier in various formats
+                         (e.g., "0001", "patient_0001", "/path/to/0001_arteries.nii.gz")
+
+    Returns:
+        str: 4-digit patient ID (e.g., "0001")
+    """
+    import re
+
+    # Try to find a 4-digit pattern
+    match = re.search(r"\d{4}", patient_id_input)
+    if match:
+        return match.group()
+
+    # Fallback: return original input
+    return patient_id_input
+
+
+def _count_segments_by_terminal_level4(graph: nx.DiGraph) -> tuple[dict, dict]:
+    """
+    Count terminal level 4 vessels as segments - simple and direct approach.
+
+    A segment is defined as a level 4 edge that either:
+    1. Has no successors (terminal endpoint), OR
+    2. Has successors but none of them are level 4 (transitions to sub-segmental)
+
+    Args:
+        graph: Directed graph with hierarchical levels
+
+    Returns:
+        tuple: (segment_to_lobe dict, segment_counts_by_lobe dict)
+    """
+    segment_edges = set()  # Use edge tuples (u, v) as identifiers
+    segment_to_lobe = {}
+
+    # Find all level 4 edges
+    for u, v, edge_data in graph.edges(data=True):
+        if edge_data.get("level") == 4:
+            edge_key = (u, v)
+
+            # Check successors from the target node v
+            successors = list(graph.successors(v))
+
+            # Check if any successor is level 4
+            has_level4_successor = False
+            for succ in successors:
+                if graph.has_edge(v, succ):
+                    succ_level = graph.edges[v, succ].get("level", 3)
+                    if succ_level == 4:
+                        has_level4_successor = True
+                        break
+
+            # This is a terminal segment if:
+            # - No successors at all, OR
+            # - Has successors but none are level 4
+            if not has_level4_successor:
+                segment_edges.add(edge_key)
+
+                # Map to lobe
+                lobe = edge_data.get("lobe", "unknown")
+                if isinstance(lobe, list):
+                    if len(lobe) > 1:
+                        segment_to_lobe[edge_key] = "interlobar"
+                    elif len(lobe) == 1:
+                        segment_to_lobe[edge_key] = lobe[0]
+                    else:
+                        segment_to_lobe[edge_key] = "unknown"
+                else:
+                    segment_to_lobe[edge_key] = lobe
+
+                edge_id = edge_data.get("edge_id", f"{u}_{v}")
+                logger.debug(
+                    f"Terminal segment [edge_id: {edge_id}], "
+                    f"lobe={segment_to_lobe[edge_key]}, "
+                    f"successors={len(successors)}, "
+                    f"has_level4_successor={has_level4_successor}"
+                )
+
+    # Count by lobe
+    segment_counts_by_lobe = {}
+    for lobe in ["RUL", "RML", "RLL", "LUL", "LLL", "interlobar", "unknown"]:
+        count = sum(1 for seg_lobe in segment_to_lobe.values() if seg_lobe == lobe)
+        if count > 0:
+            segment_counts_by_lobe[lobe] = count
+
+    logger.info(f"Found {len(segment_edges)} terminal level 4 segments")
+    for lobe, count in segment_counts_by_lobe.items():
+        logger.info(f"  {lobe}: {count} segments")
+
+    return segment_to_lobe, segment_counts_by_lobe
+
+
+def _collect_labelling_stats(graph: nx.DiGraph) -> dict:
+    """
+    Collect segment chain statistics by lobe from labeled graph.
+
+    Args:
+        graph: Labeled directed graph
+
+    Returns:
+        dict: Statistics with keys for each lobe, total_chains, and level4_edges
+    """
+    # Initialize counters
+    stats = {
+        "RUL": 0,
+        "RML": 0,
+        "RLL": 0,
+        "LUL": 0,
+        "LLL": 0,
+        "interlobar": 0,
+        "unknown": 0,
+        "total_chains": 0,
+        "level4_edges": 0,
+    }
+
+    # Count level 4 edges (individual)
+    stats["level4_edges"] = sum(
+        1 for _, _, d in graph.edges(data=True) if d.get("level") == 4
+    )
+
+    # Count terminal segments using simplified logic
+    segment_to_lobe, segment_counts_by_lobe = _count_segments_by_terminal_level4(graph)
+
+    # Update stats with segment counts
+    for lobe in ["RUL", "RML", "RLL", "LUL", "LLL", "interlobar", "unknown"]:
+        stats[lobe] = segment_counts_by_lobe.get(lobe, 0)
+
+    stats["total_chains"] = sum(segment_counts_by_lobe.values())
+
+    return stats
+
+
+def _append_labelling_stats_to_csv(
+    output_path: Path,
+    patient_id: str,
+    stats: dict,
+) -> None:
+    """Append labelling statistics row to CSV file."""
+    # Extract 4-digit patient ID
+    patient_id_clean = _extract_patient_id(patient_id)
+
+    with open(output_path, "a", newline="") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(
+            [
+                patient_id_clean,
+                stats["RUL"],
+                stats["RML"],
+                stats["RLL"],
+                stats["LUL"],
+                stats["LLL"],
+                stats["interlobar"],
+                stats["unknown"],
+                stats["total_chains"],
+                stats["level4_edges"],
+            ]
+        )
 
 
 # =============================================================================
@@ -953,7 +1145,7 @@ def _count_segments_by_linear_chains(
     visited_nodes: set = None,
 ) -> None:
     """
-    Count vascular segments as linear chains rather than individual edges.
+    Count vascular segments as branching territories rather than individual edges.
 
     Args:
         graph: Directed graph representing vascular tree
@@ -963,15 +1155,25 @@ def _count_segments_by_linear_chains(
         visited_nodes: Set tracking visited nodes to prevent double-counting
 
     Algorithm:
-        1. Traverse tree looking for level 4+ vessel chains
-        2. Identify linear sequences of connected segment-level vessels
-        3. Count each chain once using chain start node as identifier
-        4. Map each chain to its primary anatomical lobe
+        1. Traverse tree looking for level 4 vessel chains
+        2. For each level 4 chain, trace to its terminal point
+        3. Analyze bifurcation type:
+           - If ANY child is level 4: trunk (don't count, explore children)
+           - If ALL children are level 5+: terminal segment (count it)
+           - If no successors: terminal segment (count it)
+        4. Map each terminal chain to its primary anatomical lobe
 
-    Chain Definition:
-        Linear sequence of level 4+ vessels with single predecessor/successor
-        relationships, representing functional vascular segments.
+    Examples:
+        Level 4 → bifurcation → [Level 4, Level 4]: Don't count parent, count 2 children
+        Level 4 → bifurcation → [Level 4, Level 5]: Don't count parent, count 1 child (the Level 4)
+        Level 4 → bifurcation → [Level 5, Level 5]: Count 1 segment (the Level 4 chain)
+        Level 4 → bifurcation → [Level 5, Level 6]: Count 1 segment (the Level 4 chain)
+        Level 4 → terminal (no children): Count 1 segment
 
+    Note:
+        The key distinction is whether ANY bifurcation child is level 4.
+        If yes: parent is a trunk feeding more segments (don't count).
+        If no: parent is a terminal segment transitioning to sub-segmental (count).
     """
     if visited_nodes is None:
         visited_nodes = set()
@@ -986,15 +1188,64 @@ def _count_segments_by_linear_chains(
         child_level = child_edge.get("level", 3)
 
         if child_level == 4:
-            # Found start of a segment chain - trace to the end
+            # Found start of a potential segment chain
             segment_start = child
             segment_end = _find_segment_chain_end(graph, child)
 
-            # Only count this chain once using the start node
-            if segment_start not in segments_found:
+            # Check what happens at the end of this chain
+            end_successors = list(graph.successors(segment_end))
+
+            # Determine if this is a terminal segment or a trunk leading to branches
+            is_terminal_segment = True
+            has_level4_children = False
+
+            if len(end_successors) > 1:
+                # Bifurcation - check if it branches into more level 4 vessels
+                for succ in end_successors:
+                    if graph.has_edge(segment_end, succ):
+                        succ_level = graph.edges[segment_end, succ].get("level", 3)
+                        if succ_level == 4:
+                            has_level4_children = True
+                            break
+
+                if has_level4_children:
+                    # This chain bifurcates into more level 4 vessels
+                    # Don't count this as a segment - it's a trunk
+                    # The child branches will be counted instead
+                    is_terminal_segment = False
+                    logger.debug(
+                        f"Chain {segment_start}->{segment_end} is a trunk bifurcating "
+                        f"into level 4 branches - not counting, will explore children"
+                    )
+                else:
+                    # Bifurcates but NOT into level 4 vessels (e.g., level 5+)
+                    # This IS a terminal segment - count it!
+                    is_terminal_segment = True
+                    logger.debug(
+                        f"Chain {segment_start}->{segment_end} bifurcates into "
+                        f"non-level-4 vessels - counting as terminal segment"
+                    )
+            elif len(end_successors) == 1:
+                # Single successor - already traced through it in _find_segment_chain_end
+                # This is a continuing chain, counted as one segment
+                is_terminal_segment = True
+                logger.debug(
+                    f"Chain {segment_start}->{segment_end} continues linearly - "
+                    f"counting as segment"
+                )
+            else:
+                # No successors - true terminal endpoint
+                is_terminal_segment = True
+                logger.debug(
+                    f"Chain {segment_start}->{segment_end} is terminal endpoint - "
+                    f"counting as segment"
+                )
+
+            # Count this chain if it's terminal
+            if is_terminal_segment and segment_start not in segments_found:
                 segments_found.add(segment_start)
 
-                # Map this segment chain to its lobe - handle list format
+                # Map this segment chain to its lobe
                 lobe = child_edge.get("lobe", "unknown")
                 if isinstance(lobe, list):
                     if len(lobe) > 1:
@@ -1006,14 +1257,27 @@ def _count_segments_by_linear_chains(
                 else:
                     segment_to_lobe[segment_start] = lobe
 
-            # Mark all nodes in this chain as visited to avoid double counting
+                logger.debug(
+                    f"✓ Counted segment chain #{len(segments_found)}: "
+                    f"start={segment_start}, end={segment_end}, "
+                    f"lobe={segment_to_lobe[segment_start]}"
+                )
+
+            # Mark this chain as visited
             _mark_chain_as_visited(graph, segment_start, segment_end, visited_nodes)
 
+            # IMPORTANT: Continue traversal from the END of this chain
+            # to find potential child segment branches
+            _count_segments_by_linear_chains(
+                graph, segment_end, segments_found, segment_to_lobe, visited_nodes
+            )
+
         elif child_level > 4:
-            # Skip paths that are already past segments
+            # Sub-segmental branches - don't traverse further
+            logger.debug(f"Skipping sub-segmental branch at level {child_level}")
             continue
         else:
-            # For non-segment edges, continue traversal
+            # Level < 4: continue traversal to find segments downstream
             _count_segments_by_linear_chains(
                 graph, child, segments_found, segment_to_lobe, visited_nodes
             )
@@ -1028,30 +1292,55 @@ def _find_segment_chain_end(graph: nx.DiGraph, start_node: int) -> int:
         start_node: Beginning node of segment chain
 
     Returns:
-        int: Final node in the linear chain of level 4+ vessels
+        int: Final node in the linear chain of level 4 vessels
 
     Algorithm:
-        Follow single-successor path until reaching branching point,
-        terminal node, or level transition boundary.
+        Follow single-successor path of level 4 vessels until reaching:
+        1. Terminal node (no successors)
+        2. Bifurcation point (multiple successors) - STOP HERE
+        3. Level transition (level != 4) - STOP HERE
+
+    Note:
+        We stop at bifurcations because the CALLER needs to analyze
+        what type of bifurcation it is (into more level 4 vs into level 5+).
+        The bifurcation node IS part of this chain's territory.
     """
     current = start_node
 
     while True:
         successors = list(graph.successors(current))
 
-        # If no successors or multiple successors, this is the end
-        if len(successors) != 1:
+        # Stop condition 1: No successors (terminal node)
+        if len(successors) == 0:
+            logger.debug(f"Segment chain ending at terminal node {current}")
             break
 
+        # Stop condition 2: Multiple successors (bifurcation)
+        # We stop here so caller can analyze the bifurcation type
+        if len(successors) > 1:
+            logger.debug(f"Segment chain ending at bifurcation node {current}")
+            break
+
+        # Single successor - check level
         next_node = successors[0]
         next_edge = graph.edges[current, next_node]
         next_level = next_edge.get("level", 3)
 
-        # If next edge is not level 4+, this is the end of segment chain
-        if next_level < 4:
+        # Stop condition 3: Level change
+        if next_level != 4:
+            if next_level > 4:
+                logger.debug(
+                    f"Segment chain ending at node {current} "
+                    f"before entering level {next_level}"
+                )
+            else:
+                logger.warning(
+                    f"Unexpected level decrease from 4 to {next_level} "
+                    f"at edge {current}->{next_node}"
+                )
             break
 
-        # Continue along the chain
+        # Continue along the chain (next_level == 4 and single successor)
         current = next_node
 
     return current
@@ -1066,21 +1355,34 @@ def _mark_chain_as_visited(
     Args:
         graph: Directed graph being analyzed
         start_node: First node in segment chain
-        end_node: Last node in segment chain
+        end_node: Last node in segment chain (inclusive)
         visited_nodes: Set of nodes to mark as processed
+
+    Note:
+        Marks all nodes from start to end INCLUSIVE, because the end node
+        is part of this chain's territory even if it's a bifurcation point.
     """
     current = start_node
     visited_nodes.add(current)
 
     while current != end_node:
         successors = list(graph.successors(current))
+
         if len(successors) != 1:
+            logger.debug(
+                f"Stopping chain marking at {current} "
+                f"(expected end: {end_node}, successors: {len(successors)})"
+            )
             break
 
         next_node = successors[0]
         next_edge = graph.edges[current, next_node]
+        next_level = next_edge.get("level", 3)
 
-        if next_edge.get("level", 3) < 4:
+        if next_level != 4:
+            logger.debug(
+                f"Stopping chain marking at {current} due to level change to {next_level}"
+            )
             break
 
         visited_nodes.add(next_node)
@@ -1090,85 +1392,64 @@ def _mark_chain_as_visited(
 def _add_segment_counts(graph: nx.DiGraph) -> dict[str, int]:
     """
     Calculate and add segment counts to each vessel edge as metadata.
-    This adds the 'segments_below' attribute to each edge with level 1-3,
-    representing the number of unique downstream segment chains (not
-    individual level 4 edges).
+
+    Uses simplified terminal level 4 detection instead of complex chain traversal.
 
     Args:
         graph: Directed graph with hierarchical classification (modified in-place)
 
     Returns:
         dict: Segment counts organized by anatomical lobe
-
-    Algorithm:
-        1. For each level 1-3 vessel, count downstream segment chains
-        2. Add 'segments_below' attribute to vessel edges
-        3. Verify count consistency across hierarchy levels
-        4. Generate summary statistics by anatomical region
     """
-    logger.info("Counting downstream segment chains for each vessel")
+    logger.info("Counting downstream terminal level 4 segments for each vessel")
 
-    # We'll build segment_to_lobe during traversal
-    segment_to_lobe = {}
+    # Get all terminal segments using simplified logic
+    segment_to_lobe, segment_counts_by_lobe = _count_segments_by_terminal_level4(graph)
+    all_terminal_segments = set(segment_to_lobe.keys())
 
-    # Track segment chains by vessel
-    all_segments = set()
-    segments_by_level = {1: set(), 2: set(), 3: set()}
-    segments_by_lobe = {
-        lobe: set()
-        for lobe in ["None", "interlobar", "RUL", "RML", "RLL", "LUL", "LLL", "unknown"]
-    }
-
-    # Count segment chains downstream of each vessel
+    # For each level 1-3 edge, count how many terminal segments are downstream
     for _, v, edge_data in graph.edges(data=True):
         if edge_data.get("level") in [1, 2, 3]:
-            segments_found = set()  # Track unique segment chain starts
+            # Find all terminal segments downstream of this edge
+            downstream_segments = set()
 
-            # Find segment chains downstream from this edge
-            _count_segments_by_linear_chains(graph, v, segments_found, segment_to_lobe)
+            # Simple BFS to find all descendants
+            queue = deque([v])
+            visited = set([v])
 
-            # Add the count to edge attributes
-            segment_count = len(segments_found)
+            while queue:
+                node = queue.popleft()
+
+                # Check if any outgoing edge from this node is a terminal segment
+                for succ in graph.successors(node):
+                    edge_key = (node, succ)
+                    if edge_key in all_terminal_segments:
+                        downstream_segments.add(edge_key)
+
+                    if succ not in visited:
+                        visited.add(succ)
+                        queue.append(succ)
+
+            # Add count to edge
+            segment_count = len(downstream_segments)
+            edge_data["segments_below"] = segment_count
+
             if segment_count > 0:
-                edge_data["segments_below"] = segment_count
-
-                # Add these segment chains to the correct collections
-                level = edge_data.get("level")
-                if level in segments_by_level:
-                    segments_by_level[level].update(segments_found)
-                all_segments.update(segments_found)
-
-                # For each segment chain found, add it to its primary lobe collection
-                for segment_node in segments_found:
-                    if segment_node in segment_to_lobe:
-                        primary_lobe = segment_to_lobe[segment_node]
-                        if primary_lobe in segments_by_lobe:
-                            segments_by_lobe[primary_lobe].add(segment_node)
-
                 logger.debug(
-                    "Edge (%s): %s segment chains below",
+                    "Edge (%s): %d terminal segments below",
                     edge_data.get("name", "unnamed"),
                     segment_count,
                 )
             else:
-                edge_data["segments_below"] = 0
                 logger.warning(
-                    "Edge (%s) has no downstream segment chains. This may indicate an issue either in the segmented vessel, or an anatomical reality.",
+                    "Edge (%s) has no downstream terminal segments",
                     edge_data.get("name", "unnamed"),
                 )
 
-    # Convert sets to counts for reporting
-    segment_counts_by_lobe = {
-        lobe: len(segments)
-        for lobe, segments in segments_by_lobe.items()
-        if len(segments) > 0
-    }
-    total_segments = len(all_segments)
+    total_segments = len(all_terminal_segments)
+    logger.info("Total terminal level 4 segments in tree: %d", total_segments)
 
-    # Log summary statistics
-    logger.info("Total unique segment chains in tree: %s", total_segments)
-
-    # Check that MPA has all segments
+    # Verify MPA has all segments
     mpa_edges = [
         (u, v, d) for u, v, d in graph.edges(data=True) if d.get("name") == "MPA"
     ]
@@ -1176,27 +1457,10 @@ def _add_segment_counts(graph: nx.DiGraph) -> dict[str, int]:
         mpa_segment_count = mpa_edges[0][2].get("segments_below", 0)
         if mpa_segment_count != total_segments:
             logger.warning(
-                "Segment count mismatch: MPA shows %d segment chains but found %d in tree",
+                "Segment count mismatch: MPA shows %d segments but found %d in tree",
                 mpa_segment_count,
                 total_segments,
             )
-
-    # Log segment chains by lobe
-    for lobe, count in segment_counts_by_lobe.items():
-        logger.info("Segment chains in %s: %d", lobe, count)
-
-    # Verify our count adds up correctly
-    lobe_totals = sum(
-        len(segments)
-        for lobe, segments in segments_by_lobe.items()
-        if lobe not in ["None", "interlobar", "unknown"]
-    )
-    if total_segments != lobe_totals:
-        logger.warning(
-            "Segment count inconsistency: Sum of lobe segment chains (%d) doesn't match total (%d)",
-            lobe_totals,
-            total_segments,
-        )
 
     return segment_counts_by_lobe
 
@@ -1372,6 +1636,9 @@ def label_graph(
     lungs_dict: dict[str, any],
     diameter_threshold: float = 0.5,
     length_threshold: float = 1.5,
+    patient_id: str | None = None,
+    patient_stats_path: Path | None = None,
+    global_stats_path: Path | None = None,
 ) -> nx.DiGraph:
     """
     Complete anatomical labeling pipeline for pulmonary vascular tree graphs.
@@ -1387,6 +1654,9 @@ def label_graph(
                    - lung_upper_lobe_right, lung_middle_lobe_right, etc.: lobe masks
         diameter_threshold: Minimum diameter ratio for trunk vessel classification
         length_threshold: Maximum length/diameter ratio for trunk vessels
+        patient_id: Optional patient identifier for statistics tracking
+        patient_stats_path: Path to patient-specific CSV file (optional)
+        global_stats_path: Path to global CSV file (optional)
 
     Returns:
         nx.DiGraph: Comprehensively labeled graph with:
@@ -1405,6 +1675,7 @@ def label_graph(
         6. Advanced Hierarchy: Apply morphological rules for levels 3+
         7. Quality Control: Validate completeness and consistency
         8. Statistical Analysis: Generate segment counts and summaries
+        9. Statistics Export: Save patient and global statistics (if paths provided)
 
     Morphological Criteria:
         - Trunk vessels: Large diameter relative to parent, short relative to diameter
@@ -1418,6 +1689,20 @@ def label_graph(
         - Statistical reporting
     """
     logger.info("Starting anatomical labeling")
+
+    # Initialize statistics tracking if paths provided
+    if patient_stats_path is not None and global_stats_path is not None:
+        patient_stats_path = Path(patient_stats_path)
+        global_stats_path = Path(global_stats_path)
+
+        # Initialize CSV files if they don't exist
+        _initialize_labelling_stats_csv(patient_stats_path)
+        if not global_stats_path.exists():
+            _initialize_labelling_stats_csv(global_stats_path)
+
+        if patient_id is None:
+            patient_id = "unknown"
+            logger.warning("No patient_id provided for statistics tracking")
 
     # Prepare lung masks
     lungs = {"right": lungs_dict["lung_right"], "left": lungs_dict["lung_left"]}
@@ -1448,18 +1733,41 @@ def label_graph(
     # Step 5: Mark interlobar vessels
     _mark_interlobar_vessels(graph)
 
-    # Step 6 : Convert lobes to strings
+    # Step 6: Convert lobes to strings
     _convert_lobes_to_strings(graph)
 
     # Step 7: Create hierarchical levels based on bifurcation rules with configurable thresholds
-    # logger.debug("Starting hierarchical level creation...")
     _create_hierarchical_levels(graph, diameter_threshold, length_threshold)
 
     # Step 8: Check for missing lobes
     _check_for_missing_lobes(graph)
 
-    # Add level summary
+    # Step 9: Add level summary and segment counts
     _print_level_summary(graph)
+
+    # Step 10: Collect and save statistics (if paths provided)
+    if patient_stats_path is not None and global_stats_path is not None:
+        logger.info("Collecting labelling statistics")
+        stats = _collect_labelling_stats(graph)
+
+        # Append to both patient and global CSV files
+        _append_labelling_stats_to_csv(patient_stats_path, patient_id, stats)
+        _append_labelling_stats_to_csv(global_stats_path, patient_id, stats)
+
+        logger.info("Patient statistics saved to: %s", patient_stats_path)
+        logger.info("Global statistics updated: %s", global_stats_path)
+
+        # Log summary
+        logger.info("Labelling statistics summary:")
+        logger.info(
+            "  RUL: %d, RML: %d, RLL: %d", stats["RUL"], stats["RML"], stats["RLL"]
+        )
+        logger.info("  LUL: %d, LLL: %d", stats["LUL"], stats["LLL"])
+        logger.info(
+            "  Interlobar: %d, Unknown: %d", stats["interlobar"], stats["unknown"]
+        )
+        logger.info("  Total segment chains: %d", stats["total_chains"])
+        logger.info("  Level 4 edges: %d", stats["level4_edges"])
 
     logger.info("Labeling complete")
     return graph
