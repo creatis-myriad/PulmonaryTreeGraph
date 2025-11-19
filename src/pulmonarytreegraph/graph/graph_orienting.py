@@ -176,20 +176,22 @@ def prepare_edge_attrs(
 
             if first_matches_source and last_matches_target:
                 # Already correctly oriented
-                logger.debug(f"Centerline already correct for edge {source}->{target}")
+                logger.debug(
+                    "Centerline already correct for edge %s->%s", source, target
+                )
 
             elif np.array_equal(centerline_first, target_pos) and np.array_equal(
                 centerline_last, source_pos
             ):
                 # Needs reversal
-                logger.debug(f"Reversing centerline for edge {source}->{target}")
+                logger.debug("Reversing centerline for edge %s->%s", source, target)
                 edge_attrs["centerline"] = list(reversed(edge_attrs["centerline"]))
                 if "radius" in edge_attrs:
                     edge_attrs["radius"] = list(reversed(edge_attrs["radius"]))
             else:
                 # Ambiguous case - log warning
                 logger.warning(
-                    f"Ambiguous centerline orientation for edge {source}->{target}"
+                    "Ambiguous centerline orientation for edge %s->%s", source, target
                 )
 
         except (ValueError, TypeError, KeyError) as e:
@@ -316,7 +318,7 @@ def validate_centerline_orientations(graph: nx.DiGraph) -> list[str]:
                     f"Edge {source}->{target}: centerline doesn't flow from source to target"
                 )
 
-        except Exception as e:
+        except (ValueError, TypeError, KeyError, IndexError) as e:
             issues.append(
                 f"Edge {source}->{target}: failed to validate centerline - {e}"
             )
@@ -374,7 +376,7 @@ def validate_parent_child_centerline_connectivity(graph: nx.DiGraph) -> list[str
                         f"Child edge {node}->{child}: last centerline point {child_last_point} != child node pos {child_node_pos}"
                     )
 
-            except Exception as e:
+            except (ValueError, TypeError, KeyError, IndexError) as e:
                 issues.append(
                     f"Failed to validate connectivity for edge {node}->{child}: {e}"
                 )
@@ -423,18 +425,20 @@ def validate_tree_orientation(
     # Check tree property: edges = nodes - 1
     if graph.number_of_edges() != graph.number_of_nodes() - 1:
         issues.append(
-            f"Not a tree: {graph.number_of_edges()} edges for {graph.number_of_nodes()} nodes"
+            "Not a tree: %d edges for %d nodes"
+            % (graph.number_of_edges(), graph.number_of_nodes())
         )
 
     # Check root has no incoming edges
     if graph.in_degree(root_id) != 0:
-        issues.append(f"Root node {root_id} has incoming edges")
+        issues.append("Root node %d has incoming edges" % root_id)
 
     # Check all non-root nodes have exactly one incoming edge
     for node in graph.nodes():
         if node != root_id and graph.in_degree(node) != 1:
             issues.append(
-                f"Non-root node {node} has {graph.in_degree(node)} incoming edges (should be 1)"
+                "Non-root node %d has %d incoming edges (should be 1)"
+                % (node, graph.in_degree(node))
             )
 
     # Check leaves have no outgoing edges
@@ -480,10 +484,10 @@ def orient_graph(graph: nx.Graph) -> nx.DiGraph:
                    - Properly oriented centerlines and radii
 
     Algorithm:
-        1. **Root Selection**: Find terminal branch with maximum mean radius
-        2. **Root Identification**: Choose degree-1 endpoint as tree root
-        3. **Orientation**: Use BFS to create consistent parent-child structure
-        4. **Validation**: Comprehensive quality control of result
+        1. Root Selection: Find terminal branch with maximum mean radius
+        2. Root Identification: Choose degree-1 endpoint as tree root
+        3. Orientation: Use BFS to create consistent parent-child structure
+        4. Validation: Comprehensive quality control of result
     """
     # Input validation
     if graph is None:
@@ -525,7 +529,7 @@ def orient_graph(graph: nx.Graph) -> nx.DiGraph:
 
     # Validation (root always gets ID 0)
     root_id = 0
-    logger.info(f"Validating tree with root_id={root_id} (original root was {root})")
+    logger.info("Validating tree with root_id=%d (original root was %d)", root_id, root)
 
     is_valid, issues = validate_tree_orientation(new_graph, root_id)
 
@@ -537,18 +541,20 @@ def orient_graph(graph: nx.Graph) -> nx.DiGraph:
         # Debug information
         logger.error("Debug info:")
         logger.error(
-            f"  - Graph has {new_graph.number_of_nodes()} nodes, {new_graph.number_of_edges()} edges"
+            "  - Graph has %d nodes, %d edges",
+            new_graph.number_of_nodes(),
+            new_graph.number_of_edges(),
         )
         logger.error(
-            f"  - Root node {root_id} in_degree: {new_graph.in_degree(root_id)}"
+            "  - Root node %d in_degree: %d", root_id, new_graph.in_degree(root_id)
         )
         logger.error(
-            f"  - Root node {root_id} out_degree: {new_graph.out_degree(root_id)}"
+            "  - Root node %d out_degree: %d", root_id, new_graph.out_degree(root_id)
         )
 
         # Identify nodes with incorrect in-degree
         zero_in_degree = [n for n in new_graph.nodes() if new_graph.in_degree(n) == 0]
-        logger.error(f"  - Nodes with 0 incoming edges: {zero_in_degree}")
+        logger.error("  - Nodes with 0 incoming edges: %s", zero_in_degree)
 
     else:
         logger.info("Tree orientation validation passed")
