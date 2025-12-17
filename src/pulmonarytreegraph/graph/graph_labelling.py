@@ -923,6 +923,9 @@ def _create_hierarchical_levels(
         4. Assign appropriate hierarchy levels based on morphology
     """
 
+    logger.info("Diameter threshold: %.2f", diameter_threshold)
+    logger.info("Length threshold: %.2f", length_threshold)
+
     # Find all level 2 edges to start from
     level2_edges = [
         (u, v) for u, v, data in graph.edges(data=True) if data.get("level") == 2
@@ -1074,7 +1077,7 @@ def _apply_vessel_rules(
     return new_level
 
 
-def _is_trunk_vessel(
+def _is_trunk_vessel_original(
     vessel_diameter: float,
     vessel_length: float,
     parent_diameter: float,
@@ -1132,261 +1135,164 @@ def _is_trunk_vessel(
         return is_trunk_diameter and is_trunk_length
 
 
+def _is_trunk_vessel(
+    vessel_diameter: float,
+    vessel_length: float,
+    parent_diameter: float,
+    vessel_lobe: str,
+    diameter_threshold: float,
+    length_threshold: float,
+    parent_level: int = None,
+) -> bool:
+    """
+    Parameterized trunk detection for experimental testing.
+
+    Args:
+        vessel_diameter: Diameter of vessel being classified
+        vessel_length: Length of vessel being classified
+        parent_diameter: Diameter of parent vessel
+        vessel_lobe: Anatomical lobe served by vessel
+        parent_level: Hierarchy level of parent vessel
+        use_and_logic: If True, use AND (both must pass). If False, use OR (either passes)
+
+    Returns:
+        bool: True if vessel qualifies as trunk
+    """
+    if parent_diameter == 0 or vessel_diameter == 0:
+        return False
+
+    elif parent_level is not None and parent_level <= 2:
+        diameter_threshold = 0.5
+        length_threshold = 2.5
+        logic_type = "OR"
+        logger.debug(
+            f"Parent level ≤2, adjusting to: d≥{diameter_threshold}, l≤{length_threshold}, {logic_type}"
+        )
+    else:
+        diameter_threshold = 0.7
+        length_threshold = 1.5
+        logic_type = "AND"
+        logger.debug(
+            f"Using default criteria: d≥{diameter_threshold}, l≤{length_threshold}, {logic_type}"
+        )
+
+    diameter_ratio = vessel_diameter / parent_diameter
+    length_ratio = vessel_length / vessel_diameter
+
+    is_trunk_diameter = diameter_ratio >= diameter_threshold
+    is_trunk_length = length_ratio <= length_threshold
+
+    if logic_type == "OR":
+        result = is_trunk_diameter or is_trunk_length
+    else:
+        result = is_trunk_diameter and is_trunk_length
+
+    # Detailed logging for debugging
+    logger.debug(
+        f"Trunk decision for {vessel_lobe}: "
+        f"diameter_ratio={diameter_ratio:.3f} ({'✓' if is_trunk_diameter else '✗'}), "
+        f"length_ratio={length_ratio:.3f} ({'✓' if is_trunk_length else '✗'}), "
+        f"result={'TRUNK' if result else 'ARTERY'}"
+    )
+
+    return result
+
+
+def _is_trunk_vessel_optimized_mean_parameters(
+    vessel_diameter: float,
+    vessel_length: float,
+    parent_diameter: float,
+    vessel_lobe: str,
+    diameter_threshold: float,
+    length_threshold: float,
+    parent_level: int = None,
+) -> bool:
+    """
+    Parameterized trunk detection for experimental testing.
+
+    Args:
+        vessel_diameter: Diameter of vessel being classified
+        vessel_length: Length of vessel being classified
+        parent_diameter: Diameter of parent vessel
+        vessel_lobe: Anatomical lobe served by vessel ("RUL", "RML", "RLL", "LUL", "LLL", etc.)
+        diameter_threshold: Ignored - will be set based on lobe
+        length_threshold: Ignored - will be set based on lobe
+        parent_level: Hierarchy level of parent vessel
+    """
+    if parent_diameter == 0 or vessel_diameter == 0:
+        return False
+
+    diameter_ratio = vessel_diameter / parent_diameter
+    length_ratio = vessel_length / vessel_diameter
+
+    # Lobe-specific optimized criteria based on experimental results
+    if vessel_lobe in ["RML", "LLL"]:
+        # RML & LLL: Use stricter diameter threshold (test_12)
+        optimized_diameter_threshold = 0.7
+        optimized_length_threshold = 1.5
+        logic_type = "AND"
+        logger.debug(
+            f"Using test_12 criteria for {vessel_lobe}: d≥{optimized_diameter_threshold}, l≤{optimized_length_threshold}, {logic_type}"
+        )
+        if parent_level is not None and parent_level <= 2:
+            optimized_diameter_threshold = 0.5
+            optimized_length_threshold = 2.5
+            logic_type = "OR"
+            logger.debug(
+                f"Parent level ≤2, adjusting to: d≥{optimized_diameter_threshold}, l≤{optimized_length_threshold}, {logic_type}"
+            )
+
+    elif vessel_lobe in ["RUL", "RLL", "LUL"]:
+        # RUL, RLL, LUL: Use moderate diameter threshold (test_11)
+        optimized_diameter_threshold = 0.6
+        optimized_length_threshold = 1.5
+        logic_type = "AND"
+        if parent_level is not None and parent_level <= 2:
+            optimized_diameter_threshold = 0.5
+            optimized_length_threshold = 2.5
+            logic_type = "OR"
+            logger.debug(
+                f"Parent level ≤2, adjusting to: d≥{optimized_diameter_threshold}, l≤{optimized_length_threshold}, {logic_type}"
+            )
+
+        logger.debug(
+            f"Using test_11 criteria for {vessel_lobe}: d≥{optimized_diameter_threshold}, l≤{optimized_length_threshold}, {logic_type}"
+        )
+
+    else:
+        # Fallback for unknown/interlobar vessels: use conservative criteria
+        optimized_diameter_threshold = 0.6
+        optimized_length_threshold = 1.5
+        logic_type = "AND"
+
+        logger.debug(
+            f"Using fallback test_11 criteria for {vessel_lobe}: d≥{optimized_diameter_threshold}, l≤{optimized_length_threshold}, {logic_type}"
+        )
+
+    # Apply the criteria
+    is_trunk_diameter = diameter_ratio >= optimized_diameter_threshold
+    is_trunk_length = length_ratio <= optimized_length_threshold
+
+    # All optimized configs use AND logic
+    if logic_type == "AND":
+        result = is_trunk_diameter and is_trunk_length
+    else:  # OR logic
+        result = is_trunk_diameter or is_trunk_length
+
+    # Detailed logging for debugging
+    logger.debug(
+        f"Trunk decision for {vessel_lobe}: "
+        f"diameter_ratio={diameter_ratio:.3f} ({'✓' if is_trunk_diameter else '✗'}), "
+        f"length_ratio={length_ratio:.3f} ({'✓' if is_trunk_length else '✗'}), "
+        f"result={'TRUNK' if result else 'BRANCH'}"
+    )
+
+    return result
+
+
 # =============================================================================
 # SEGMENTAL ANALYSIS
 # =============================================================================
-
-
-def _count_segments_by_linear_chains(
-    graph: nx.DiGraph,
-    current_node: int,
-    segments_found: set,
-    segment_to_lobe: dict,
-    visited_nodes: set = None,
-) -> None:
-    """
-    Count vascular segments as branching territories rather than individual edges.
-
-    Args:
-        graph: Directed graph representing vascular tree
-        current_node: Node to start traversal from
-        segments_found: Set collecting unique segment chain identifiers
-        segment_to_lobe: Dictionary mapping segment chains to anatomical lobes
-        visited_nodes: Set tracking visited nodes to prevent double-counting
-
-    Algorithm:
-        1. Traverse tree looking for level 4 vessel chains
-        2. For each level 4 chain, trace to its terminal point
-        3. Analyze bifurcation type:
-           - If ANY child is level 4: trunk (don't count, explore children)
-           - If ALL children are level 5+: terminal segment (count it)
-           - If no successors: terminal segment (count it)
-        4. Map each terminal chain to its primary anatomical lobe
-
-    Examples:
-        Level 4 → bifurcation → [Level 4, Level 4]: Don't count parent, count 2 children
-        Level 4 → bifurcation → [Level 4, Level 5]: Don't count parent, count 1 child (the Level 4)
-        Level 4 → bifurcation → [Level 5, Level 5]: Count 1 segment (the Level 4 chain)
-        Level 4 → bifurcation → [Level 5, Level 6]: Count 1 segment (the Level 4 chain)
-        Level 4 → terminal (no children): Count 1 segment
-
-    Note:
-        The key distinction is whether ANY bifurcation child is level 4.
-        If yes: parent is a trunk feeding more segments (don't count).
-        If no: parent is a terminal segment transitioning to sub-segmental (count).
-    """
-    if visited_nodes is None:
-        visited_nodes = set()
-
-    # Process all children
-    for child in graph.successors(current_node):
-        if child in visited_nodes:
-            continue
-
-        # Get edge data
-        child_edge = graph.edges[current_node, child]
-        child_level = child_edge.get("level", 3)
-
-        if child_level == 4:
-            # Found start of a potential segment chain
-            segment_start = child
-            segment_end = _find_segment_chain_end(graph, child)
-
-            # Check what happens at the end of this chain
-            end_successors = list(graph.successors(segment_end))
-
-            # Determine if this is a terminal segment or a trunk leading to branches
-            is_terminal_segment = True
-            has_level4_children = False
-
-            if len(end_successors) > 1:
-                # Bifurcation - check if it branches into more level 4 vessels
-                for succ in end_successors:
-                    if graph.has_edge(segment_end, succ):
-                        succ_level = graph.edges[segment_end, succ].get("level", 3)
-                        if succ_level == 4:
-                            has_level4_children = True
-                            break
-
-                if has_level4_children:
-                    # This chain bifurcates into more level 4 vessels
-                    # Don't count this as a segment - it's a trunk
-                    # The child branches will be counted instead
-                    is_terminal_segment = False
-                    logger.debug(
-                        f"Chain {segment_start}->{segment_end} is a trunk bifurcating "
-                        f"into level 4 branches - not counting, will explore children"
-                    )
-                else:
-                    # Bifurcates but NOT into level 4 vessels (e.g., level 5+)
-                    # This IS a terminal segment - count it!
-                    is_terminal_segment = True
-                    logger.debug(
-                        f"Chain {segment_start}->{segment_end} bifurcates into "
-                        f"non-level-4 vessels - counting as terminal segment"
-                    )
-            elif len(end_successors) == 1:
-                # Single successor - already traced through it in _find_segment_chain_end
-                # This is a continuing chain, counted as one segment
-                is_terminal_segment = True
-                logger.debug(
-                    f"Chain {segment_start}->{segment_end} continues linearly - "
-                    f"counting as segment"
-                )
-            else:
-                # No successors - true terminal endpoint
-                is_terminal_segment = True
-                logger.debug(
-                    f"Chain {segment_start}->{segment_end} is terminal endpoint - "
-                    f"counting as segment"
-                )
-
-            # Count this chain if it's terminal
-            if is_terminal_segment and segment_start not in segments_found:
-                segments_found.add(segment_start)
-
-                # Map this segment chain to its lobe
-                lobe = child_edge.get("lobe", "unknown")
-                if isinstance(lobe, list):
-                    if len(lobe) > 1:
-                        segment_to_lobe[segment_start] = "interlobar"
-                    elif len(lobe) == 1:
-                        segment_to_lobe[segment_start] = lobe[0]
-                    else:
-                        segment_to_lobe[segment_start] = "unknown"
-                else:
-                    segment_to_lobe[segment_start] = lobe
-
-                logger.debug(
-                    f"✓ Counted segment chain #{len(segments_found)}: "
-                    f"start={segment_start}, end={segment_end}, "
-                    f"lobe={segment_to_lobe[segment_start]}"
-                )
-
-            # Mark this chain as visited
-            _mark_chain_as_visited(graph, segment_start, segment_end, visited_nodes)
-
-            # IMPORTANT: Continue traversal from the END of this chain
-            # to find potential child segment branches
-            _count_segments_by_linear_chains(
-                graph, segment_end, segments_found, segment_to_lobe, visited_nodes
-            )
-
-        elif child_level > 4:
-            # Sub-segmental branches - don't traverse further
-            logger.debug(f"Skipping sub-segmental branch at level {child_level}")
-            continue
-        else:
-            # Level < 4: continue traversal to find segments downstream
-            _count_segments_by_linear_chains(
-                graph, child, segments_found, segment_to_lobe, visited_nodes
-            )
-
-
-def _find_segment_chain_end(graph: nx.DiGraph, start_node: int) -> int:
-    """
-    Locate the terminal node of a linear segment chain.
-
-    Args:
-        graph: Directed graph with hierarchical levels
-        start_node: Beginning node of segment chain
-
-    Returns:
-        int: Final node in the linear chain of level 4 vessels
-
-    Algorithm:
-        Follow single-successor path of level 4 vessels until reaching:
-        1. Terminal node (no successors)
-        2. Bifurcation point (multiple successors) - STOP HERE
-        3. Level transition (level != 4) - STOP HERE
-
-    Note:
-        We stop at bifurcations because the CALLER needs to analyze
-        what type of bifurcation it is (into more level 4 vs into level 5+).
-        The bifurcation node IS part of this chain's territory.
-    """
-    current = start_node
-
-    while True:
-        successors = list(graph.successors(current))
-
-        # Stop condition 1: No successors (terminal node)
-        if len(successors) == 0:
-            logger.debug(f"Segment chain ending at terminal node {current}")
-            break
-
-        # Stop condition 2: Multiple successors (bifurcation)
-        # We stop here so caller can analyze the bifurcation type
-        if len(successors) > 1:
-            logger.debug(f"Segment chain ending at bifurcation node {current}")
-            break
-
-        # Single successor - check level
-        next_node = successors[0]
-        next_edge = graph.edges[current, next_node]
-        next_level = next_edge.get("level", 3)
-
-        # Stop condition 3: Level change
-        if next_level != 4:
-            if next_level > 4:
-                logger.debug(
-                    f"Segment chain ending at node {current} "
-                    f"before entering level {next_level}"
-                )
-            else:
-                logger.warning(
-                    f"Unexpected level decrease from 4 to {next_level} "
-                    f"at edge {current}->{next_node}"
-                )
-            break
-
-        # Continue along the chain (next_level == 4 and single successor)
-        current = next_node
-
-    return current
-
-
-def _mark_chain_as_visited(
-    graph: nx.DiGraph, start_node: int, end_node: int, visited_nodes: set
-) -> None:
-    """
-    Mark all nodes in a segment chain as processed to prevent double-counting.
-
-    Args:
-        graph: Directed graph being analyzed
-        start_node: First node in segment chain
-        end_node: Last node in segment chain (inclusive)
-        visited_nodes: Set of nodes to mark as processed
-
-    Note:
-        Marks all nodes from start to end INCLUSIVE, because the end node
-        is part of this chain's territory even if it's a bifurcation point.
-    """
-    current = start_node
-    visited_nodes.add(current)
-
-    while current != end_node:
-        successors = list(graph.successors(current))
-
-        if len(successors) != 1:
-            logger.debug(
-                f"Stopping chain marking at {current} "
-                f"(expected end: {end_node}, successors: {len(successors)})"
-            )
-            break
-
-        next_node = successors[0]
-        next_edge = graph.edges[current, next_node]
-        next_level = next_edge.get("level", 3)
-
-        if next_level != 4:
-            logger.debug(
-                f"Stopping chain marking at {current} due to level change to {next_level}"
-            )
-            break
-
-        visited_nodes.add(next_node)
-        current = next_node
 
 
 def _add_segment_counts(graph: nx.DiGraph) -> dict[str, int]:
