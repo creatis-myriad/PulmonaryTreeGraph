@@ -2160,6 +2160,15 @@ def clean_graph(
         logger.info("Patient statistics saved to: %s", patient_stats_path)
         logger.info("Global statistics updated: %s", global_stats_path)
 
+        # Step 6 final stage add final statistics into the csv
+        current_stats = _get_detailed_stats(graph)
+        _append_stats_to_csv(
+            patient_stats_path, patient_id, "6_final", current_stats, previous_stats
+        )
+        _append_stats_to_csv(
+            global_stats_path, patient_id, "6_final", current_stats, previous_stats
+        )
+
     except Exception as e:
         logger.error("Error during graph cleaning: %s", e)
         import traceback
