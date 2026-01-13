@@ -274,7 +274,7 @@ def full_graph_transversal_obstructions(
     vessel_mask_by_segment: bool = False,
     centerline_key: str = "centerline",
     obstruction_key: str = "transversal_obstruction",
-    progress_bar: bool = False,
+    progress_bar: bool = True,
     **transversal_obstruction_kwargs,
 ) -> nx.Graph:
     """Computes the transversal obstruction for vessels in a 3D image whose centerline are defined in a graph.
@@ -297,13 +297,38 @@ def full_graph_transversal_obstructions(
     """
     vessel_graph = vessel_graph.copy()
 
-    edges = vessel_graph.edges(data=True)
+    # STEP 1: Initialize all edges with zero transversal obstruction values
+    logger.info("Initializing transversal obstruction values to 0 for all edges")
+    for source_node, target_node, edge_data in vessel_graph.edges(data=True):
+        # Get centerline to determine the number of points
+        centerline = np.array(edge_data[centerline_key]).T  # (N, 3) -> (3, N)
+        num_centerline_points = centerline.shape[1]
+
+        # Initialize with zeros for all centerline points
+        vessel_graph.edges[source_node, target_node][obstruction_key] = np.zeros(
+            num_centerline_points
+        )
+        vessel_graph.edges[source_node, target_node][f"{obstruction_key}_max"] = 0.0
+
+    # STEP 2: Only compute transversal obstruction for edges that have embolisms
+    edges_with_embolism = [
+        (u, v, data)
+        for u, v, data in vessel_graph.edges(data=True)
+        if data.get("has_embolism", False)
+    ]
+
+    logger.info(
+        f"Computing transversal obstruction for {len(edges_with_embolism)} edges with embolisms"
+    )
+
     if progress_bar:
-        edges = tqdm(
-            edges, desc="Computing transversal obstructions", unit="vessel segment"
+        edges_with_embolism = tqdm(
+            edges_with_embolism,
+            desc="Computing transversal obstructions",
+            unit="vessel segment with PE",
         )
 
-    for source_node, target_node, edge_data in edges:
+    for source_node, target_node, edge_data in edges_with_embolism:
         centerline = np.array(edge_data[centerline_key]).T  # (N, 3) -> (3, N)
 
         # If the vessel mask is labelled by segment, use the edge ID to extract only the segment of interest
@@ -319,16 +344,47 @@ def full_graph_transversal_obstructions(
                     f"Including all vessel labels in the vessel mask for this specific segment."
                 )
 
-        obstruction_values = transversal_obstruction(
-            vessel_or_segment_mask,
-            obstruction_mask,
-            centerline,
-            **transversal_obstruction_kwargs,
-        )
-        # Add the computed obstruction values as an edge attribute
-        vessel_graph.edges[source_node, target_node][
-            obstruction_key
-        ] = obstruction_values
+        try:
+            obstruction_values = transversal_obstruction(
+                vessel_or_segment_mask,
+                obstruction_mask,
+                centerline,
+                **transversal_obstruction_kwargs,
+            )
+
+            # Replace the initialized zeros with computed values
+            vessel_graph.edges[source_node, target_node][
+                obstruction_key
+            ] = obstruction_values
+
+            # Calculate max transversal obstruction and store it as well
+            valid_obstruction_values = obstruction_values[~np.isnan(obstruction_values)]
+            if len(valid_obstruction_values) > 0:
+                max_obstruction = np.max(valid_obstruction_values)
+                logger.debug(
+                    f"Edge ({source_node}, {target_node}): max obstruction = {max_obstruction:.4f} from {len(valid_obstruction_values)} valid values"
+                )
+            else:
+                max_obstruction = 0.0
+                logger.warning(
+                    f"Edge ({source_node}, {target_node}): all transversal obstruction values are NaN, setting max to 0.0"
+                )
+
+            vessel_graph.edges[source_node, target_node][
+                f"{obstruction_key}_max"
+            ] = max_obstruction
+
+        except Exception as e:
+            logger.error(
+                f"Error computing transversal obstruction for edge ({source_node}, {target_node}): {e}"
+            )
+            # Keep the initialized zero values in case of error
+
+    logger.info(
+        f"Transversal obstruction computation complete. "
+        f"Processed {len(edges_with_embolism)} edges with embolisms, "
+        f"{len(vessel_graph.edges()) - len(edges_with_embolism)} edges remain with zero obstruction."
+    )
 
     return vessel_graph
 
