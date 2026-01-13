@@ -906,7 +906,7 @@ def _convert_lobes_to_strings(graph: nx.DiGraph) -> None:
 
 
 def _create_hierarchical_levels(
-    graph: nx.DiGraph, diameter_threshold: float = 0.7, length_threshold: float = 2
+    graph: nx.DiGraph, diameter_threshold: float = 0.7, length_threshold: float = 1.5
 ) -> None:
     """
     Apply iterative bifurcation rules to establish vessel hierarchy beyond level 2.
@@ -936,13 +936,20 @@ def _create_hierarchical_levels(
     # Initialize queue with children of level 2 edges
     for u, v in level2_edges:
         parent_diameter = graph.edges[u, v].get("mean_radius", 0) * 2
+        parent_lobe = graph.edges[u, v].get("lobe", "unknown")
         for successor in graph.successors(v):
-            queue.append((v, successor, 2, parent_diameter))
+            queue.append((v, successor, 2, parent_diameter, parent_lobe))
 
     processed_edges = set()
 
     while queue:
-        parent_node, current_node, parent_level, parent_diameter = queue.popleft()
+        (
+            parent_node,
+            current_node,
+            parent_level,
+            parent_diameter,
+            parent_lobe,
+        ) = queue.popleft()
 
         edge_key = (parent_node, current_node)
         if edge_key in processed_edges:
@@ -958,16 +965,22 @@ def _create_hierarchical_levels(
             current_node,
             parent_level,
             parent_diameter,
+            parent_lobe,  # PASS PARENT LOBE
             diameter_threshold,
             length_threshold,
         )
 
-        # Use cached data for diameter calculation
+        # Get current edge data for next iteration
         current_diameter = edge_data.get("mean_radius", 0) * 2
-        for successor in graph.successors(current_node):
-            queue.append((current_node, successor, new_level, current_diameter))
+        current_lobe = edge_data.get("lobe", "unknown")
 
-    logger.info("Hierarchical levels created (iterative)")
+        # Add successors to queue with CURRENT edge as the new parent
+        for successor in graph.successors(current_node):
+            queue.append(
+                (current_node, successor, new_level, current_diameter, current_lobe)
+            )
+
+    logger.info("Hierarchical levels created with upper-to-lower crossing rules")
 
 
 def _apply_vessel_rules(
@@ -976,6 +989,7 @@ def _apply_vessel_rules(
     current_node: int,
     parent_level: int,
     parent_diameter: float,
+    parent_lobe: str,
     diameter_threshold: float,
     length_threshold: float,
 ) -> int:
@@ -1024,12 +1038,7 @@ def _apply_vessel_rules(
         edge_data["name"] = f"Interlobar_L3_{parent_node}_{current_node}"
 
     elif current_level == 3 and parent_level == 2:
-        logger.debug(
-            "Processing level 3 edge with parent level 2: %s -> %s",
-            parent_node,
-            current_node,
-        )
-        # Pass parent_level to trunk detection
+        # Pass parent_level AND parent_lobe to trunk detection
         is_trunk = _is_trunk_vessel(
             vessel_diameter,
             vessel_length,
@@ -1038,6 +1047,7 @@ def _apply_vessel_rules(
             diameter_threshold,
             length_threshold,
             parent_level,
+            parent_lobe,  # NOW PASSING PARENT LOBE
         )
 
         if is_trunk:
@@ -1050,7 +1060,7 @@ def _apply_vessel_rules(
         edge_data["level"] = new_level
 
     else:
-        # Pass parent_level to trunk detection
+        # Pass parent_level AND parent_lobe to trunk detection
         is_trunk = _is_trunk_vessel(
             vessel_diameter,
             vessel_length,
@@ -1059,6 +1069,7 @@ def _apply_vessel_rules(
             diameter_threshold,
             length_threshold,
             parent_level,
+            parent_lobe,  # NOW PASSING PARENT LOBE
         )
 
         if is_trunk:
@@ -1135,7 +1146,7 @@ def _is_trunk_vessel_original(
         return is_trunk_diameter and is_trunk_length
 
 
-def _is_trunk_vessel(
+def _is_trunk_vessel_test(
     vessel_diameter: float,
     vessel_length: float,
     parent_diameter: float,
@@ -1143,6 +1154,7 @@ def _is_trunk_vessel(
     diameter_threshold: float,
     length_threshold: float,
     parent_level: int = None,
+    parent_lobe: str = None,
 ) -> bool:
     """
     Parameterized trunk detection for experimental testing.
@@ -1153,6 +1165,7 @@ def _is_trunk_vessel(
         parent_diameter: Diameter of parent vessel
         vessel_lobe: Anatomical lobe served by vessel
         parent_level: Hierarchy level of parent vessel
+        parent_lobe: Anatomical lobe of parent vessel
         use_and_logic: If True, use AND (both must pass). If False, use OR (either passes)
 
     Returns:
@@ -1161,20 +1174,42 @@ def _is_trunk_vessel(
     if parent_diameter == 0 or vessel_diameter == 0:
         return False
 
-    elif parent_level is not None and parent_level <= 2:
-        diameter_threshold = 0.5
-        length_threshold = 2.5
-        logic_type = "OR"
-        logger.debug(
-            f"Parent level ≤2, adjusting to: d≥{diameter_threshold}, l≤{length_threshold}, {logic_type}"
-        )
-    else:
+    # Define vessel classification rules based on parent level and vessel lobe
+
+    if vessel_lobe in ["RUL", "RLL", "LUL"]:
+        # RUL, RLL, LUL vessels: use moderate criteria
+        diameter_threshold = 0.6
+        length_threshold = 1.5
+        logic_type = "AND"
+        rule_type = "moderate_rul_rll_lul"
+    elif vessel_lobe in ["RML", "LLL"]:
+        # RML and LLL vessels: use strict criteria
         diameter_threshold = 0.7
         length_threshold = 1.5
         logic_type = "AND"
-        logger.debug(
-            f"Using default criteria: d≥{diameter_threshold}, l≤{length_threshold}, {logic_type}"
-        )
+        rule_type = "strict_rml_lll"
+    elif parent_level <= 2:
+        # Early branching vessels: use lenient criteria
+        diameter_threshold = 0.5
+        length_threshold = 2.5
+        logic_type = "OR"
+        rule_type = "early_branch"
+    # elif parent_level == 3 and vessel_lobe in ["RLL", "LLL"] :#and parent_lobe in ["RML", "RUL", "LUL", "interlobar"]:
+    #    # Cross-lobe vessels to lower lobes: use lenient criteria
+    #    diameter_threshold = 0.5
+    #    length_threshold = 2.5
+    #    logic_type = "OR"
+    #    rule_type = "cross_lobe_to_lower"
+    else:
+        # Fallback for unknown/interlobar vessels
+        diameter_threshold = 0.6
+        length_threshold = 1.5
+        logic_type = "OR"
+        rule_type = "fallback"
+
+    logger.debug(
+        f"Applied {rule_type} rule: d≥{diameter_threshold}, l≤{length_threshold}, {logic_type}"
+    )
 
     diameter_ratio = vessel_diameter / parent_diameter
     length_ratio = vessel_length / vessel_diameter
@@ -1198,7 +1233,7 @@ def _is_trunk_vessel(
     return result
 
 
-def _is_trunk_vessel_optimized_mean_parameters(
+def _is_trunk_vessel_previous_test(  # _optimized_mean_parameters
     vessel_diameter: float,
     vessel_length: float,
     parent_diameter: float,
@@ -1226,48 +1261,42 @@ def _is_trunk_vessel_optimized_mean_parameters(
     length_ratio = vessel_length / vessel_diameter
 
     # Lobe-specific optimized criteria based on experimental results
-    if vessel_lobe in ["RML", "LLL"]:
+    if vessel_lobe in ["RML", "LLL"]:  # baseline
         # RML & LLL: Use stricter diameter threshold (test_12)
         optimized_diameter_threshold = 0.7
         optimized_length_threshold = 1.5
         logic_type = "AND"
-        logger.debug(
-            f"Using test_12 criteria for {vessel_lobe}: d≥{optimized_diameter_threshold}, l≤{optimized_length_threshold}, {logic_type}"
-        )
-        if parent_level is not None and parent_level <= 2:
-            optimized_diameter_threshold = 0.5
-            optimized_length_threshold = 2.5
-            logic_type = "OR"
-            logger.debug(
-                f"Parent level ≤2, adjusting to: d≥{optimized_diameter_threshold}, l≤{optimized_length_threshold}, {logic_type}"
-            )
-
-    elif vessel_lobe in ["RUL", "RLL", "LUL"]:
+        rule_type = "strict_rml_lll"
+    elif vessel_lobe in ["RUL", "RLL", "LUL"]:  # baseline
         # RUL, RLL, LUL: Use moderate diameter threshold (test_11)
         optimized_diameter_threshold = 0.6
         optimized_length_threshold = 1.5
         logic_type = "AND"
-        if parent_level is not None and parent_level <= 2:
+        rule_type = "moderate_rul_rll_lul"
+        if (
+            parent_level is not None and parent_level <= 2
+        ):  # perforing_rule for early branching
             optimized_diameter_threshold = 0.5
             optimized_length_threshold = 2.5
             logic_type = "OR"
-            logger.debug(
-                f"Parent level ≤2, adjusting to: d≥{optimized_diameter_threshold}, l≤{optimized_length_threshold}, {logic_type}"
-            )
-
-        logger.debug(
-            f"Using test_11 criteria for {vessel_lobe}: d≥{optimized_diameter_threshold}, l≤{optimized_length_threshold}, {logic_type}"
-        )
+            rule_type = "early_branch"
+        # elif parent_level == 3 and vessel_lobe in ["RLL", "LLL"] :#and parent_lobe in ["RML", "RUL", "LUL", "interlobar"]:
+        #    # Cross-lobe vessels to lower lobes: use lenient criteria
+        #    diameter_threshold = 0.5
+        #    length_threshold = 2.5
+        #    logic_type = "OR"
+        #    rule_type = "cross_lobe_to_lower"
 
     else:
-        # Fallback for unknown/interlobar vessels: use conservative criteria
+        # Fallback for unknown/interlobar vessels: moderate thresholds
         optimized_diameter_threshold = 0.6
         optimized_length_threshold = 1.5
         logic_type = "AND"
+        rule_type = "fallback"
 
-        logger.debug(
-            f"Using fallback test_11 criteria for {vessel_lobe}: d≥{optimized_diameter_threshold}, l≤{optimized_length_threshold}, {logic_type}"
-        )
+    logger.debug(
+        f"Applied {rule_type} rule: d≥{diameter_threshold}, l≤{length_threshold}, {logic_type}"
+    )
 
     # Apply the criteria
     is_trunk_diameter = diameter_ratio >= optimized_diameter_threshold
@@ -1284,7 +1313,106 @@ def _is_trunk_vessel_optimized_mean_parameters(
         f"Trunk decision for {vessel_lobe}: "
         f"diameter_ratio={diameter_ratio:.3f} ({'✓' if is_trunk_diameter else '✗'}), "
         f"length_ratio={length_ratio:.3f} ({'✓' if is_trunk_length else '✗'}), "
-        f"result={'TRUNK' if result else 'BRANCH'}"
+        f"result={'TRUNK' if result else 'ARTERY'}"
+    )
+
+    return result
+
+
+def _is_trunk_vessel(
+    vessel_diameter: float,
+    vessel_length: float,
+    parent_diameter: float,
+    vessel_lobe: str,
+    diameter_threshold: float,
+    length_threshold: float,
+    parent_level: int = None,
+    parent_lobe: str = None,
+) -> bool:
+    """
+    Parameterized trunk detection with early branching and upper-to-lower lobe rules.
+
+    Args:
+        vessel_diameter: Diameter of vessel being classified
+        vessel_length: Length of vessel being classified
+        parent_diameter: Diameter of parent vessel
+        vessel_lobe: Anatomical lobe served by vessel ("RUL", "RML", "RLL", "LUL", "LLL", etc.)
+        diameter_threshold: Base diameter threshold (may be overridden by lobe-specific rules)
+        length_threshold: Base length threshold (may be overridden by lobe-specific rules)
+        parent_level: Hierarchy level of parent vessel
+        parent_lobe: Anatomical lobe of parent vessel (for cross-lobe detection)
+
+    Returns:
+        bool: True if vessel qualifies as trunk
+    """
+    if parent_diameter == 0 or vessel_diameter == 0:
+        return False
+
+    diameter_ratio = vessel_diameter / parent_diameter
+    length_ratio = vessel_length / vessel_diameter
+
+    # Helper function to check if crossing from upper to lower lobe
+    def _is_upper_to_lower_crossing(parent_lobe_str: str, vessel_lobe_str: str) -> bool:
+        """Check if vessel crosses from upper/middle lobe to lower lobe."""
+        upper_middle_lobes = ["RUL", "RML", "LUL", "interlobar"]
+        lower_lobes = ["RLL", "LLL"]
+
+        # Handle list format for parent lobe
+        if isinstance(parent_lobe_str, list):
+            if len(parent_lobe_str) == 1:
+                parent_lobe_str = parent_lobe_str[0]
+            elif len(parent_lobe_str) > 1:
+                parent_lobe_str = "interlobar"
+            else:
+                parent_lobe_str = "unknown"
+
+        return parent_lobe_str in upper_middle_lobes and vessel_lobe_str in lower_lobes
+
+    # RULE 1: Early branching rule (parent level <= 2)
+    if parent_level is not None and parent_level <= 2:
+        optimized_diameter_threshold = 0.5
+        optimized_length_threshold = 2.5
+        logic_type = "OR"
+        rule_type = "early_branch"
+
+    # RULE 2: Upper-to-lower lobe crossing rule
+    elif (
+        parent_level is not None
+        and parent_level == 3
+        and parent_lobe is not None
+        and _is_upper_to_lower_crossing(parent_lobe, vessel_lobe)
+    ):
+        # Lenient criteria for upper-to-lower crossings (similar to early branch)
+        optimized_diameter_threshold = 0.5
+        optimized_length_threshold = 2.5
+        logic_type = "OR"
+        rule_type = "upper_to_lower_crossing"
+
+    else:
+        # Fallback for unknown/interlobar vessels
+        optimized_diameter_threshold = diameter_threshold
+        optimized_length_threshold = length_threshold
+        logic_type = "AND"
+        rule_type = "trunk_standard"
+
+    # Apply the criteria
+    is_trunk_diameter = diameter_ratio >= optimized_diameter_threshold
+    is_trunk_length = length_ratio <= optimized_length_threshold
+
+    # Apply logic type
+    if logic_type == "OR":
+        result = is_trunk_diameter or is_trunk_length
+    else:  # AND logic
+        result = is_trunk_diameter and is_trunk_length
+
+    # Detailed logging for debugging
+    logger.debug(
+        f"Trunk decision for {vessel_lobe} (parent: {parent_lobe}, level: {parent_level}): "
+        f"rule='{rule_type}', "
+        f"diameter_ratio={diameter_ratio:.3f} ({'✓' if is_trunk_diameter else '✗'}), "
+        f"length_ratio={length_ratio:.3f} ({'✓' if is_trunk_length else '✗'}), "
+        f"thresholds: d≥{optimized_diameter_threshold}, l≤{optimized_length_threshold}, "
+        f"logic={logic_type}, result={'TRUNK' if result else 'ARTERY'}"
     )
 
     return result
@@ -1353,7 +1481,7 @@ def _add_segment_counts(graph: nx.DiGraph) -> dict[str, int]:
                 )
 
     total_segments = len(all_terminal_segments)
-    logger.info("Total terminal level 4 segments in tree: %d", total_segments)
+    logger.debug("Total terminal level 4 segments in tree: %d", total_segments)
 
     # Verify MPA has all segments
     mpa_edges = [
@@ -1540,7 +1668,7 @@ def _print_level_summary(graph: nx.DiGraph) -> None:
 def label_graph(
     graph: nx.DiGraph,
     lungs_dict: dict[str, any],
-    diameter_threshold: float = 0.5,
+    diameter_threshold: float = 0.7,
     length_threshold: float = 1.5,
     patient_id: str | None = None,
     patient_stats_path: Path | None = None,
