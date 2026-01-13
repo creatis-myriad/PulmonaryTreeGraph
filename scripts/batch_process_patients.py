@@ -15,10 +15,7 @@ import time
 from typing import Any
 
 from pulmonarytreegraph.pipeline.core import process_patient_complete_pipeline
-from pulmonarytreegraph.utils.segment_heatmap_generator import (
-    create_segment_heatmap_from_batch,
-    create_segment_heatmaps_from_multiple_batches,
-)
+from pulmonarytreegraph.scores.compute_scores import compute_literature_scores
 
 
 def setup_logging(output_dir: str = None, log_level: str = "INFO"):
@@ -324,13 +321,18 @@ def process_single_patient(
             ),
             skip_steps=processing_options.get("skip_steps", []),
             stop_after=processing_options.get("stop_after"),
-            diameter_threshold=processing_options.get("diameter_threshold", 0.5),
+            diameter_threshold=processing_options.get("diameter_threshold", 0.7),
             length_threshold=processing_options.get("length_threshold", 1.5),
             compute_transversal_obstruction=processing_options.get(
                 "compute_transversal_obstruction", False
             ),
             transversal_obstruction_kwargs=processing_options.get(
                 "transversal_obstruction_kwargs", {}
+            ),
+            compute_qanadli=processing_options.get("compute_qanadli", False),
+            compute_mastora=processing_options.get("compute_mastora", False),
+            obstruction_attr=processing_options.get(
+                "obstruction_attr", "volumetric_obstruction"
             ),
         )
 
@@ -509,129 +511,290 @@ def generate_batch_report(
     logger.info(f"Batch report saved to: {report_path}")
 
 
-def generate_segment_heatmaps(
-    output_dir: str, batch_name: str = None, logger: logging.Logger = None
-):
-    """
-    Generate segment heatmaps from the batch processing log file.
+def run_scores_only_mode(args, logger):
+    """Run scoring on existing enriched graphs."""
 
-    Args:
-        output_dir: Directory containing the batch processing logs
-        batch_name: Name for the batch (used in figure titles)
-        logger: Logger instance
-    """
+    logger.info("Running scores-only mode")
+    logger.info("=" * 50)
 
-    if logger is None:
-        logger = logging.getLogger(__name__)
+    # Handle the --compute-all-scores flag
+    if args.compute_all_scores:
+        args.compute_qanadli = True
+        args.compute_mastora = True
 
-    # Find the most recent log file
-    log_dir = os.path.join(output_dir, "logs")
-    if not os.path.exists(log_dir):
-        logger.warning("No logs directory found for heatmap generation")
-        return
+    if not (args.compute_qanadli or args.compute_mastora):
+        logger.error(
+            "Must specify at least one score to compute (use --compute-qanadli, --compute-mastora, or --compute-all-scores)"
+        )
+        return False
 
-    log_files = glob.glob(os.path.join(log_dir, "batch_processing_*.log"))
-    if not log_files:
-        logger.warning("No batch processing log files found for heatmap generation")
-        return
+    # Find enriched graphs in output directory or specific enriched_graphs folder
+    if args.save_enriched_graphs:
+        enriched_graphs_dir = os.path.join(args.output_dir, "enriched_graphs")
+    else:
+        enriched_graphs_dir = args.output_dir
 
-    # Get the most recent log file
-    latest_log = max(log_files, key=os.path.getmtime)
-    logger.info(f"Generating heatmaps from log file: {latest_log}")
-
-    # Create analysis directory
-    analysis_dir = os.path.join(output_dir, "analysis")
-    os.makedirs(analysis_dir, exist_ok=True)
+    logger.info(f"Looking for enriched graphs in: {enriched_graphs_dir}")
+    logger.info(f"Obstruction attribute: {args.obstruction_attr}")
+    logger.info(f"Qanadli score: {args.compute_qanadli}")
+    logger.info(f"Mastora scores: {args.compute_mastora}")
 
     try:
-        # Generate single batch heatmap
-        if batch_name is None:
-            batch_name = f"Batch_{os.path.basename(output_dir)}"
+        # Import the helper functions from scores.py
+        sys.path.append(os.path.dirname(__file__))
 
-        heatmap_path = os.path.join(analysis_dir, f"{batch_name}_segment_heatmap.png")
+        # Import directly or copy the functions we need
+        graph_files = find_enriched_graphs_for_scoring(enriched_graphs_dir)
+        logger.info(f"Found {len(graph_files)} enriched graph files")
 
-        fig = create_segment_heatmap_from_batch(
-            batch_log_path=latest_log,
-            batch_name=batch_name,
-            save_path=heatmap_path,
-            figsize=(12, 8),
-        )
+        if not graph_files:
+            logger.error("No enriched graph files found")
+            return False
 
-        if fig:
-            logger.info(f"✓ Segment heatmap generated: {heatmap_path}")
-            # Close the figure to free memory
-            import matplotlib.pyplot as plt
+        # Filter by patient list if provided
+        if args.patient_list and os.path.exists(args.patient_list):
+            with open(args.patient_list) as f:
+                allowed_patients = set(line.strip() for line in f if line.strip())
+            graph_files = [
+                g for g in graph_files if g["patient_id"] in allowed_patients
+            ]
+            logger.info(f"Filtered to {len(graph_files)} patients from patient list")
 
-            plt.close(fig)
-        else:
-            logger.warning("Failed to generate segment heatmap - no segment data found")
+        # Exclude patients if specified
+        if args.exclude_patients:
+            exclude_set = set(args.exclude_patients)
+            graph_files = [g for g in graph_files if g["patient_id"] not in exclude_set]
+            logger.info(f"Excluded patients, {len(graph_files)} remaining")
+
+        if not graph_files:
+            logger.error("No graphs to process after filtering")
+            return False
+
+        # Process graphs
+        results = []
+        start_time = time.time()
+
+        for i, graph_file in enumerate(graph_files, 1):
+            logger.info(
+                f"\n>>> Processing {i}/{len(graph_files)}: {graph_file['patient_id']}"
+            )
+
+            result = compute_scores_for_single_graph(
+                graph_file=graph_file,
+                compute_qanadli=args.compute_qanadli,
+                compute_mastora=args.compute_mastora,
+                obstruction_attr=args.obstruction_attr,
+                logger=logger,
+            )
+            results.append(result)
+
+        # Summary
+        total_time = time.time() - start_time
+        successful = [r for r in results if r["status"] == "completed"]
+        failed = [r for r in results if r["status"] == "failed"]
+        skipped = [r for r in results if r["status"] == "skipped"]
+
+        logger.info("\n" + "=" * 50)
+        logger.info("SCORES-ONLY MODE COMPLETED")
+        logger.info("=" * 50)
+        logger.info(f"Total processed: {len(results)}")
+        logger.info(f"Successful: {len(successful)}")
+        logger.info(f"Failed: {len(failed)}")
+        logger.info(f"Skipped: {len(skipped)}")
+        logger.info(f"Total time: {total_time:.1f} seconds")
+
+        if failed:
+            logger.info("\nFailed patients:")
+            for r in failed:
+                logger.info(f"  {r['patient_id']}: {r['error']}")
+
+        if skipped:
+            logger.info("\nSkipped patients:")
+            for r in skipped:
+                logger.info(f"  {r['patient_id']}: {r['reason']}")
+
+        return len(failed) == 0
 
     except Exception as e:
-        logger.error(f"Error generating segment heatmaps: {e}")
-        logger.exception("Heatmap generation error traceback:")
+        logger.error(f"Error in scores-only mode: {e}")
+        logger.exception("Full traceback:")
+        return False
 
 
-def generate_comparison_heatmaps(
-    batch_directories: list[str], output_dir: str = None, logger: logging.Logger = None
-):
+def find_enriched_graphs_for_scoring(input_path: str) -> list[dict]:
     """
-    Generate comparison heatmaps from multiple batch directories.
+    Find enriched graph files in directory structure.
+    Adapted from scores.py for batch processing.
 
     Args:
-        batch_directories: List of batch output directories
-        output_dir: Directory to save comparison heatmaps (defaults to current directory)
-        logger: Logger instance
+        input_path: Path to directory containing enriched graphs
+
+    Returns:
+        List of dictionaries with graph file info
     """
-    if logger is None:
-        logger = logging.getLogger(__name__)
+    graph_files = []
 
-    if output_dir is None:
-        output_dir = "."
+    if os.path.isfile(input_path):
+        # Single file
+        if input_path.endswith(".json"):
+            patient_id = extract_patient_id_from_graph_path(input_path)
+            graph_files.append(
+                {
+                    "path": input_path,
+                    "patient_id": patient_id,
+                    "output_dir": os.path.dirname(input_path),
+                }
+            )
+    else:
+        # Directory - search for enriched graphs
+        search_patterns = [
+            "*/enriched_graph*.json",
+            "enriched_graph*.json",
+            "*_enriched_graph*.json",
+            "*/enriched_graph_real_coords.json",  # Include real coordinate versions
+            "*_enriched_graph_real_coords.json",
+        ]
 
-    # Find log files from each batch directory
-    batch_log_paths = {}
+        for pattern in search_patterns:
+            search_path = os.path.join(input_path, pattern)
+            files = glob.glob(search_path, recursive=True)
 
-    for batch_dir in batch_directories:
-        batch_name = os.path.basename(batch_dir)
-        log_dir = os.path.join(batch_dir, "logs")
+            for file_path in files:
+                patient_id = extract_patient_id_from_graph_path(file_path)
+                output_dir = os.path.dirname(file_path)
 
-        if os.path.exists(log_dir):
-            log_files = glob.glob(os.path.join(log_dir, "batch_processing_*.log"))
-            if log_files:
-                latest_log = max(log_files, key=os.path.getmtime)
-                batch_log_paths[batch_name] = latest_log
-                logger.info(f"Found log for {batch_name}: {latest_log}")
-            else:
-                logger.warning(f"No log files found in {log_dir}")
-        else:
-            logger.warning(f"No logs directory found in {batch_dir}")
+                # Avoid duplicates - prefer the standard enriched_graph.json over real_coords version
+                if any(
+                    g["patient_id"] == patient_id and "real_coords" not in g["path"]
+                    for g in graph_files
+                ):
+                    continue
 
-    if len(batch_log_paths) < 2:
-        logger.warning("Need at least 2 batches for comparison heatmaps")
-        return
+                graph_files.append(
+                    {
+                        "path": file_path,
+                        "patient_id": patient_id,
+                        "output_dir": output_dir,
+                    }
+                )
 
-    # Create analysis directory
-    analysis_dir = os.path.join(output_dir, "analysis")
-    os.makedirs(analysis_dir, exist_ok=True)
+    # Remove duplicates, preferring non-real-coords versions
+    unique_graphs = {}
+    for graph in graph_files:
+        patient_id = graph["patient_id"]
+        if patient_id not in unique_graphs or "real_coords" not in graph["path"]:
+            unique_graphs[patient_id] = graph
+
+    return list(unique_graphs.values())
+
+
+def extract_patient_id_from_graph_path(file_path: str) -> str:
+    """Extract patient ID from enriched graph file path."""
+    import re
+
+    basename = os.path.basename(file_path)
+    dirname = os.path.basename(os.path.dirname(file_path))
+
+    # Pattern 1: patient_id in directory name (e.g., /results/0001/enriched_graph.json)
+    if re.match(r"\d{4}", dirname):
+        return dirname
+
+    # Pattern 2: patient_id in filename (e.g., 0001_enriched_graph.json)
+    match = re.search(r"(\d{4})_", basename)
+    if match:
+        return match.group(1)
+
+    # Pattern 3: just numbers in directory name
+    if dirname.isdigit():
+        return dirname.zfill(4)  # Pad to 4 digits
+
+    # Fallback: use directory name
+    return dirname
+
+
+def compute_scores_for_single_graph(
+    graph_file: dict,
+    compute_qanadli: bool,
+    compute_mastora: bool,
+    obstruction_attr: str,
+    logger: logging.Logger,
+) -> dict:
+    """Compute scores for a single enriched graph."""
+
+    graph_path = graph_file["path"]
+    patient_id = graph_file["patient_id"]
+    output_dir = graph_file["output_dir"]
+
+    logger.info(f"Loading graph: {os.path.basename(graph_path)}")
+
+    start_time = time.time()
 
     try:
-        # Generate comparison heatmaps
-        comparison_fig = create_segment_heatmaps_from_multiple_batches(
-            batch_log_paths=batch_log_paths, save_directory=analysis_dir
+        # Import load_graph function
+        from pulmonarytreegraph.utils.io import load_graph
+
+        # Load the enriched graph
+        enriched_graph = load_graph(graph_path)
+
+        # Check if graph has the required obstruction attribute
+        has_obstruction_data = False
+        edge_count = 0
+        for _, _, data in enriched_graph.edges(data=True):
+            edge_count += 1
+            if obstruction_attr in data:
+                has_obstruction_data = True
+                break
+
+        logger.info(
+            f"Graph has {len(enriched_graph.nodes())} nodes, {edge_count} edges"
         )
 
-        if comparison_fig:
-            logger.info(f"✓ Comparison heatmaps generated in: {analysis_dir}")
-            # Close the figure to free memory
-            import matplotlib.pyplot as plt
+        if not has_obstruction_data:
+            logger.warning(
+                f"Graph {patient_id} does not contain '{obstruction_attr}' data"
+            )
+            return {
+                "patient_id": patient_id,
+                "status": "skipped",
+                "reason": f"missing_{obstruction_attr}",
+                "processing_time": time.time() - start_time,
+            }
 
-            plt.close(comparison_fig)
-        else:
-            logger.warning("Failed to generate comparison heatmaps")
+        # Compute literature scores
+        scores = compute_literature_scores(
+            enriched_graph=enriched_graph,
+            output_dir=output_dir,
+            patient_id=patient_id,
+            compute_qanadli=compute_qanadli,
+            compute_mastora=compute_mastora,
+            obstruction_attr=obstruction_attr,
+        )
+
+        processing_time = time.time() - start_time
+
+        logger.info(f"✓ {patient_id} completed in {processing_time:.1f}s")
+
+        # Log scores
+        for score_name, score_value in scores.items():
+            logger.info(f"  {score_name}: {score_value:.4f}")
+
+        return {
+            "patient_id": patient_id,
+            "status": "completed",
+            "scores": scores,
+            "processing_time": processing_time,
+        }
 
     except Exception as e:
-        logger.error(f"Error generating comparison heatmaps: {e}")
-        logger.exception("Comparison heatmap generation error traceback:")
+        processing_time = time.time() - start_time
+        logger.error(f"✗ {patient_id} failed: {e}")
+        logger.exception("Error details:")
+        return {
+            "patient_id": patient_id,
+            "status": "failed",
+            "error": str(e),
+            "processing_time": processing_time,
+        }
 
 
 def main():
@@ -773,6 +936,29 @@ Expected directory structure:
         help="Save all enriched graphs into a specific folder in the output directory.",
     )
 
+    # Literature scores
+    parser.add_argument(
+        "--compute-qanadli",
+        action="store_true",
+        help="Compute Qanadli obstruction score",
+    )
+    parser.add_argument(
+        "--compute-mastora",
+        action="store_true",
+        help="Compute Mastora obstruction scores (central, peripheral, global)",
+    )
+    parser.add_argument(
+        "--compute-all-scores",
+        action="store_true",
+        help="Compute all available literature scores (equivalent to --compute-qanadli --compute-mastora)",
+    )
+    parser.add_argument(
+        "--obstruction-attr",
+        choices=["volumetric_obstruction", "transversal_obstruction_max"],
+        default="volumetric_obstruction",
+        help="Obstruction attribute to use for literature scores (default: volumetric_obstruction)",
+    )
+
     # Processing control
     parser.add_argument(
         "--skip-steps",
@@ -828,6 +1014,11 @@ Expected directory structure:
         nargs="+",
         help="List of other batch directories for comparison heatmaps",
     )
+    parser.add_argument(
+        "--scores-only",
+        action="store_true",
+        help="Only compute literature scores from existing enriched graphs (skip pipeline)",
+    )
 
     args = parser.parse_args()
 
@@ -841,6 +1032,12 @@ Expected directory structure:
     logger.info("Starting batch processing")
     logger.info("Data directory: %s", args.data_dir)
     logger.info("Output directory: %s", args.output_dir)
+
+    # If scores-only mode is requested, run the scoring logic and exit
+    if args.scores_only:
+        # Run scores-only mode
+        success = run_scores_only_mode(args, logger)
+        return success
 
     try:
         # Find all patients
@@ -978,7 +1175,15 @@ Expected directory structure:
         "enriched_graphs_dir": enriched_graphs_dir
         if args.save_enriched_graphs
         else None,
+        "compute_qanadli": args.compute_qanadli,
+        "compute_mastora": args.compute_mastora,
+        "obstruction_attr": args.obstruction_attr,
     }
+
+    # Handle the --compute-all-scores flag
+    if args.compute_all_scores:
+        processing_options["compute_qanadli"] = True
+        processing_options["compute_mastora"] = True
 
     # Process patients
     results = []
@@ -1079,31 +1284,50 @@ Expected directory structure:
 
     generate_batch_report(results, args.output_dir, logger)
 
-    # Generate segment heatmaps if requested
-    if args.generate_heatmaps and successful:
+    # ADD THE QUICK ANALYSIS HERE - AFTER BATCH REPORT GENERATION
+    # Quick segment analysis from global_labelling_stats.csv
+    global_stats_path = os.path.join(args.output_dir, "global_labelling_stats.csv")
+    if os.path.exists(global_stats_path) and successful:
         logger.info("\n" + "=" * 80)
-        logger.info("GENERATING SEGMENT HEATMAPS")
+        logger.info("SEGMENT ANALYSIS SUMMARY")
         logger.info("=" * 80)
 
-        # Determine batch name
-        batch_name = args.batch_name
-        if batch_name is None:
-            batch_name = os.path.basename(os.path.abspath(args.output_dir))
+        try:
+            from pulmonarytreegraph.utils.segment_heatmap_generator import (
+                quick_analysis,
+            )
 
-        # Generate single batch heatmap
-        generate_segment_heatmaps(args.output_dir, batch_name, logger)
+            metrics = quick_analysis(str(global_stats_path), verbose=True)
 
-        # Generate comparison heatmaps if other batches are specified
-        if args.comparison_batches:
-            logger.info("Generating comparison heatmaps...")
-            all_batch_dirs = [args.output_dir] + args.comparison_batches
+            # Log key summary metrics
+            if metrics:
+                success_rate = metrics.get("percentage_lobes_meeting_expected", 0)
+                logger.info(
+                    f"\nOverall Success Rate: {success_rate:.1f}% of lobes meet expected segment counts"
+                )
 
-            # Use parent directory for comparison output
-            comparison_output = os.path.dirname(os.path.abspath(args.output_dir))
-            generate_comparison_heatmaps(all_batch_dirs, comparison_output, logger)
+                # Show per-lobe summary
+                lobe_summary = []
+                for lobe in ["RUL", "RML", "RLL", "LUL", "LLL"]:
+                    mean_key = f"{lobe}_mean"
+                    meets_key = f"{lobe}_meets_expected"
+                    if mean_key in metrics and meets_key in metrics:
+                        status = "✓" if metrics[meets_key] else "✗"
+                        lobe_summary.append(f"{lobe}: {metrics[mean_key]:.1f} {status}")
 
-    elif args.generate_heatmaps and not successful:
-        logger.warning("Skipping heatmap generation - no successful patients processed")
+                if lobe_summary:
+                    logger.info(f"Per-lobe averages: {' | '.join(lobe_summary)}")
+
+        except ImportError as e:
+            logger.warning(f"Could not import segment analysis: {e}")
+        except Exception as e:
+            logger.error(f"Error during segment analysis: {e}")
+    elif not os.path.exists(global_stats_path):
+        logger.warning(
+            "Global labelling stats file not found - skipping segment analysis"
+        )
+    elif not successful:
+        logger.warning("No successful patients - skipping segment analysis")
 
     return len(failed) == 0
 

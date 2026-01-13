@@ -261,8 +261,8 @@ def main():
     parser.add_argument(
         "--diameter-threshold",
         type=float,
-        default=0.5,
-        help="Minimum diameter ratio for trunk vessels (default: 0.5)",
+        default=0.7,
+        help="Minimum diameter ratio for trunk vessels (default: 0.7)",
     )
     parser.add_argument(
         "--length-threshold",
@@ -336,6 +336,29 @@ def main():
         help="Disable patient-specific log file generation",
     )
 
+    # New arguments for obstruction scores
+    parser.add_argument(
+        "--compute-qanadli",
+        action="store_true",
+        help="Compute Qanadli obstruction score",
+    )
+    parser.add_argument(
+        "--compute-mastora",
+        action="store_true",
+        help="Compute Mastora obstruction scores",
+    )
+    parser.add_argument(
+        "--compute-all-scores",
+        action="store_true",
+        help="Compute all available literature scores",
+    )
+    parser.add_argument(
+        "--obstruction-attr",
+        choices=["volumetric_obstruction", "transversal_obstruction_max"],
+        default="volumetric_obstruction",
+        help="Obstruction attribute to use for literature scores (default: volumetric_obstruction)",
+    )
+
     args = parser.parse_args()
 
     # Extract patient name and create output directory
@@ -382,6 +405,11 @@ def main():
     start_time = time.time()
 
     try:
+        # Handle logic for computing all scores
+        if args.compute_all_scores:
+            args.compute_qanadli = True
+            args.compute_mastora = True
+
         # Call the function with the correct parameters that match the function signature
         results = process_patient_complete_pipeline(
             artery_mask_path=args.artery,
@@ -401,6 +429,9 @@ def main():
             length_threshold=args.length_threshold,
             compute_transversal_obstruction=args.compute_transversal_obstruction,
             transversal_obstruction_kwargs={"cpr_padding": args.cpr_padding},
+            compute_qanadli=args.compute_qanadli,
+            compute_mastora=args.compute_mastora,
+            obstruction_attr=args.obstruction_attr,
         )
 
         processing_time = time.time() - start_time

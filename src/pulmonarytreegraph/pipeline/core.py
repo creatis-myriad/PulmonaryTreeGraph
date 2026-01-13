@@ -17,6 +17,7 @@ from ..graph_enrichment_with_embolism import (
     integrate_embolism_into_graph,
 )
 from ..preprocessing import create_skeleton_and_distance_map
+from ..scores.compute_scores import compute_literature_scores
 from ..utils.io import (
     load_graph,
     load_niftii,
@@ -662,7 +663,7 @@ def label_vessel_graph(
     save_skeleton: bool = False,
     save_colored_volumes: list[str] | None = None,
     diameter_threshold: float = 0.7,
-    length_threshold: float = 2.0,
+    length_threshold: float = 1.5,
 ) -> dict[str, Any]:
     """
     Label a graph with anatomical information (lobes, levels, laterality).
@@ -924,6 +925,9 @@ def analyze_embolisms_complete(
     compute_transversal_obstruction: bool = False,
     transversal_obstruction_kwargs: dict | None = None,
     coordinate_format: str = "both",
+    compute_qanadli: bool = False,
+    compute_mastora: bool = False,
+    obstruction_attr: str = "volumetric_obstruction",
 ) -> dict[str, Any]:
     """
     Embolism analysis pipeline with vessel graph enrichment using integrate_embolism_into_graph.
@@ -1019,14 +1023,35 @@ def analyze_embolisms_complete(
 
         logger.info("Enriched vessel graph saved: %s", enriched_graph_paths)
 
-        # Return results
-        return {
+        # Step 4: Compute literature scores
+        enriched_graph_results = {
             **basic_results,
             "analysis_type": "enrichment",
             "vessel_analysis_performed": True,
             "enriched_graph_paths": enriched_graph_paths,
             "_enriched_graph_object": enriched_graph,
         }
+
+        if (compute_qanadli or compute_mastora) and compute_vessel_analysis:
+            logger.info("Computing literature-based obstruction scores...")
+            try:
+                scores = compute_literature_scores(
+                    enriched_graph,
+                    output_dir,
+                    patient_id=patient_name,
+                    compute_qanadli=compute_qanadli,
+                    compute_mastora=compute_mastora,
+                    obstruction_attr=obstruction_attr,
+                )
+
+                # Add scores to results
+                for score_name, score_value in scores.items():
+                    enriched_graph_results[f"{score_name}_score"] = score_value
+
+            except Exception as e:
+                logger.error(f"Error computing literature scores: {e}")
+
+        return enriched_graph_results
 
     except Exception as e:
         logger.error("Error in embolism analysis pipeline: %s", e)
@@ -1048,10 +1073,13 @@ def process_patient_complete_pipeline(
     embolism_fusion_threshold: float = 10.0,
     skip_steps: list[str] | None = None,
     stop_after: str | None = None,
-    diameter_threshold: float = 0.5,
+    diameter_threshold: float = 0.7,
     length_threshold: float = 1.5,
     compute_transversal_obstruction=False,
     transversal_obstruction_kwargs=None,
+    compute_qanadli: bool = False,
+    compute_mastora: bool = False,
+    obstruction_attr: str = "volumetric_obstruction",
 ) -> dict[str, Any]:
     """
     Complete end-to-end pipeline processing a patient from artery mask to final analysis.
@@ -1381,6 +1409,9 @@ def process_patient_complete_pipeline(
                 compute_vessel_analysis=compute_vessel_analysis,
                 compute_transversal_obstruction=compute_transversal_obstruction,
                 transversal_obstruction_kwargs=transversal_obstruction_kwargs,
+                compute_qanadli=compute_qanadli,
+                compute_mastora=compute_mastora,
+                obstruction_attr=obstruction_attr,
             )
 
             pipeline_results["embolism_analysis"] = embolism_result
