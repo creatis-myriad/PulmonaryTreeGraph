@@ -92,15 +92,39 @@ def _initialize_mastora_stats_csv(output_path: Path) -> None:
         writer.writerow(
             [
                 "patient_id",
-                "mastora_central_score",
-                "mastora_peripheral_score",
-                "mastora_global_score",
                 "obstruction_attr",
-                "central_segments_analyzed",
-                "peripheral_segments_analyzed",
-                "global_segments_analyzed",
+                # Central scores (mediastinal + lobar)
+                "mastora_central_literature_score",
+                "mastora_central_literature_score_pct",
+                "mastora_central_patient_score",
+                "mastora_central_patient_score_pct",
+                "central_segments_literature",  # Fixed: 5 mediastinal + 6 lobar = 11
+                "central_segments_patient",  # Actual count
+                "central_total_weighted_score",
+                "central_max_possible_score_literature",  # 11 × 5 = 55
+                "central_max_possible_score_patient",  # actual_count × 5
                 "central_mean_obstruction",
+                # Peripheral scores (segmental)
+                "mastora_peripheral_literature_score",
+                "mastora_peripheral_literature_score_pct",
+                "mastora_peripheral_patient_score",
+                "mastora_peripheral_patient_score_pct",
+                "peripheral_segments_literature",  # Fixed: 20 segmental
+                "peripheral_segments_patient",  # Actual count
+                "peripheral_total_weighted_score",
+                "peripheral_max_possible_score_literature",  # 20 × 5 = 100
+                "peripheral_max_possible_score_patient",  # actual_count × 5
                 "peripheral_mean_obstruction",
+                # Global scores (all levels)
+                "mastora_global_literature_score",
+                "mastora_global_literature_score_pct",
+                "mastora_global_patient_score",
+                "mastora_global_patient_score_pct",
+                "global_segments_literature",  # Fixed: 5+6+20 = 31 total
+                "global_segments_patient",  # Actual count
+                "global_total_weighted_score",
+                "global_max_possible_score_literature",  # 31 × 5 = 155
+                "global_max_possible_score_patient",  # actual_count × 5
                 "global_mean_obstruction",
             ]
         )
@@ -109,7 +133,8 @@ def _initialize_mastora_stats_csv(output_path: Path) -> None:
 def _append_mastora_stats_to_csv(
     output_path: Path,
     patient_id: str,
-    scores: dict[str, float],
+    literature_scores: dict[str, float],
+    patient_scores: dict[str, float],
     stats: dict[str, Any],
     obstruction_attr: str = "volumetric_obstruction",
 ) -> None:
@@ -122,23 +147,42 @@ def _append_mastora_stats_to_csv(
         writer.writerow(
             [
                 patient_id_clean,
-                f"{scores['central']:.6f}",
-                f"{scores['peripheral']:.6f}",
-                f"{scores['global']:.6f}",
                 obstruction_attr,
-                stats["central_segments"],
-                stats["peripheral_segments"],
-                stats["global_segments"],
+                # Central scores
+                f"{literature_scores['central']:.6f}",
+                f"{literature_scores['central'] * 100:.2f}",
+                f"{patient_scores['central']:.6f}",
+                f"{patient_scores['central'] * 100:.2f}",
+                11,  # Literature: 5 mediastinal + 6 lobar
+                stats["central_segments_patient"],
+                stats["central_total_weighted_score"],
+                55,  # Literature: 11 × 5 = 55
+                stats["central_max_possible_score_patient"],
                 f"{stats['central_mean_obstruction']:.6f}",
+                # Peripheral scores
+                f"{literature_scores['peripheral']:.6f}",
+                f"{literature_scores['peripheral'] * 100:.2f}",
+                f"{patient_scores['peripheral']:.6f}",
+                f"{patient_scores['peripheral'] * 100:.2f}",
+                20,  # Literature: 20 segmental
+                stats["peripheral_segments_patient"],
+                stats["peripheral_total_weighted_score"],
+                100,  # Literature: 20 × 5 = 100
+                stats["peripheral_max_possible_score_patient"],
                 f"{stats['peripheral_mean_obstruction']:.6f}",
+                # Global scores
+                f"{literature_scores['global']:.6f}",
+                f"{literature_scores['global'] * 100:.2f}",
+                f"{patient_scores['global']:.6f}",
+                f"{patient_scores['global'] * 100:.2f}",
+                31,  # Literature: 5+6+20 = 31 total
+                stats["global_segments_patient"],
+                stats["global_total_weighted_score"],
+                155,  # Literature: 31 × 5 = 155
+                stats["global_max_possible_score_patient"],
                 f"{stats['global_mean_obstruction']:.6f}",
             ]
         )
-
-
-# =============================================================================
-# MAIN MASTORA SCORE FUNCTION
-# =============================================================================
 
 
 def mastora_score(
@@ -151,7 +195,7 @@ def mastora_score(
     debug: bool = False,
 ) -> float | tuple[float, dict]:
     """
-    Compute the Mastora score for a directed graph with embolism information.
+    Compute both literature and patient-specific Mastora scores for a directed graph.
 
     Args:
         graph: Directed graph representing the arterial tree
@@ -166,14 +210,38 @@ def mastora_score(
         debug: If True, return debug information for visualization
 
     Returns:
-        float or tuple: Mastora score (0-1) or (score, debug_info) if debug=True
+        float or tuple: Literature Mastora score (0-1) or (score, debug_info) if debug=True
+
+    Literature Model (Mastora 2003):
+        - 5 mediastinal arteries (levels 1-2): pulmonary trunk, RPA, LPA, right and left interlobar
+        - 6 lobar arteries (level 3): RUL, RML, RLL, LUL, LLL, lingula
+        - 20 segmental arteries (level 4): standard anatomical segments
+        - Five-level grading: 0%, 1-24%, 25-49%, 50-74%, 75-99%, 100%
 
     Algorithm:
         1. Traverse graph from root using depth-first search
         2. Collect obstruction values for arteries at specified levels
-        3. Discretize obstruction values into 5 levels (1-5) + 0 (no obstruction)
-        4. Compute average normalized score: mean(degrees / max_degrees)
+        3. Discretize obstruction values into 6 levels (0-5)
+        4. Compute two scores:
+           - Literature: sum(degrees) / fixed_max_score (e.g., 155 for global)
+           - Patient-specific: sum(degrees) / (actual_segments × 5)
     """
+
+    # Literature vessel counts and max scores based on Mastora 2003 paper
+    LITERATURE_MODEL = {
+        "central": {
+            "vessel_count": 11,  # 5 mediastinal + 6 lobar
+            "max_score": 55,  # 11 × 5
+        },
+        "peripheral": {
+            "vessel_count": 20,  # 20 segmental
+            "max_score": 100,  # 20 × 5
+        },
+        "global": {
+            "vessel_count": 31,  # 5 + 6 + 20 = 31 total
+            "max_score": 155,  # 31 × 5
+        },
+    }
 
     # Determine numerical levels for which to look for obstructions, based on mode
     match mode:
@@ -209,7 +277,6 @@ def mastora_score(
                 obstructions[(node, child)] = artery_obstruction
 
                 if debug:
-                    # Updated level name mapping
                     level_name_map = {
                         1: "MEDIASTINAL_1",  # Main PA
                         2: "MEDIASTINAL_2",  # RPA/LPA
@@ -240,22 +307,54 @@ def mastora_score(
         return 0.0 if not debug else (0.0, {})
 
     obstructions_vals = list(obstructions.values())
+    actual_vessel_count = len(obstructions_vals)
 
-    # Discretize obstruction values between {0...5}, so that normalization will be in [0, 1]
+    literature_model = LITERATURE_MODEL[mode]
+    literature_vessel_count = literature_model["vessel_count"]
+    literature_max_score = literature_model["max_score"]
+
+    # Discretize obstruction values into 6 levels (0-5) using Mastora thresholds
     degrees = np.digitize(obstructions_vals, DEGREE_THRESHOLDS)
 
-    # Original paper summed the degrees across the landmark arteries, but here we normalize and average degrees
-    # to get a score between 0 and 1, invariant to the exact number of arteries of the patient
-    score = np.mean(degrees / len(DEGREE_THRESHOLDS)).item()
+    # Compute total weighted score (sum of degrees) - THIS IS THE KEY DIFFERENCE
+    total_weighted_score = np.sum(degrees)
 
-    logger.info(f"Mastora score ({mode}): {score:.4f}")
-    logger.info(f"  Segments analyzed: {len(obstructions_vals)}")
+    # Compute both normalization methods
+    # Literature: normalize using fixed vessel count and max score from anatomical model
+    literature_max_score_possible = literature_max_score  # e.g., 155 for global
+    literature_score = (
+        total_weighted_score / literature_max_score_possible
+        if literature_max_score_possible > 0
+        else 0.0
+    )
+
+    # Patient-specific: normalize using actual vessel count
+    patient_max_score_possible = actual_vessel_count * 5  # 5 is max degree
+    patient_score = (
+        total_weighted_score / patient_max_score_possible
+        if patient_max_score_possible > 0
+        else 0.0
+    )
+
+    logger.info(
+        f"Mastora {mode} Literature Score: {literature_score:.4f} ({literature_score * 100:.1f}%)"
+    )
+    logger.info(
+        f"Mastora {mode} Patient Score: {patient_score:.4f} ({patient_score * 100:.1f}%)"
+    )
+    logger.info(
+        f"  Segments analyzed: {actual_vessel_count} (literature expects {literature_vessel_count})"
+    )
+    logger.info(f"  Total weighted score: {total_weighted_score}")
+    logger.info(f"  Literature max possible: {literature_max_score_possible}")
+    logger.info(f"  Patient max possible: {patient_max_score_possible}")
     logger.info(f"  Mean obstruction: {np.mean(obstructions_vals):.4f}")
-    logger.info(f"  Mean degree: {np.mean(degrees):.2f}")
 
     if debug:
-        return score, debug_info
-    return score
+        return literature_score, debug_info
+
+    # Return literature score as main score (for backward compatibility)
+    return literature_score
 
 
 def compute_mastora_scores(
@@ -266,7 +365,7 @@ def compute_mastora_scores(
     global_stats_path: Path | None = None,
 ) -> dict[str, float]:
     """
-    Compute all Mastora score variants (central, peripheral, global) for a graph.
+    Compute all Mastora score variants (central, peripheral, global) with both literature and patient-specific scoring.
 
     Args:
         graph: Directed graph representing the arterial tree
@@ -276,46 +375,68 @@ def compute_mastora_scores(
         global_stats_path: Path for global statistics CSV
 
     Returns:
-        Dictionary with all three Mastora scores
+        Dictionary with literature Mastora scores (for backward compatibility)
     """
 
-    scores = {}
+    literature_scores = {}
+    patient_scores = {}
     stats = {}
 
     # Compute all three variants
     for mode in ["central", "peripheral", "global"]:
         try:
-            score = mastora_score(
+            # Get the literature score as main return value
+            literature_score = mastora_score(
                 graph,
                 mode=mode,
                 obstruction_attr=obstruction_attr,
                 debug=False,
             )
-            scores[mode] = score
 
-            # Collect additional statistics for this mode
+            literature_scores[mode] = literature_score
+
+            # Recalculate for patient score (we need both calculations)
             levels_to_search = {
                 "central": ArteryLevel.ALL_CENTRAL,  # {1, 2, 3}
-                "peripheral": {ArteryLevel.SEGMENTAL},  # {4}
+                "peripheral": ArteryLevel.SEGMENTAL,  # {4}
                 "global": ArteryLevel.ALL_LEVELS,  # {1, 2, 3, 4}
             }[mode]
 
-            # Count segments and compute mean obstruction for this mode
+            # Collect data for this mode
             obstructions = []
             for _, _, data in graph.edges(data=True):
                 level = data.get("level")
                 if level in levels_to_search:
                     obstructions.append(data.get(obstruction_attr, 0.0))
 
-            stats[f"{mode}_segments"] = len(obstructions)
-            stats[f"{mode}_mean_obstruction"] = (
-                np.mean(obstructions) if obstructions else 0.0
-            )
+            if obstructions:
+                degrees = np.digitize(obstructions, DEGREE_THRESHOLDS)
+                total_weighted_score = np.sum(degrees)
+                actual_vessel_count = len(obstructions)
+                patient_max_score_possible = actual_vessel_count * 5
+                patient_scores[mode] = total_weighted_score / patient_max_score_possible
+
+                # Store additional stats
+                stats[f"{mode}_segments_patient"] = actual_vessel_count
+                stats[f"{mode}_total_weighted_score"] = int(total_weighted_score)
+                stats[f"{mode}_max_possible_score_patient"] = int(
+                    patient_max_score_possible
+                )
+                stats[f"{mode}_mean_obstruction"] = np.mean(obstructions)
+            else:
+                patient_scores[mode] = 0.0
+                stats[f"{mode}_segments_patient"] = 0
+                stats[f"{mode}_total_weighted_score"] = 0
+                stats[f"{mode}_max_possible_score_patient"] = 0
+                stats[f"{mode}_mean_obstruction"] = 0.0
 
         except Exception as e:
             logger.error(f"Error computing Mastora score ({mode}): {e}")
-            scores[mode] = 0.0
-            stats[f"{mode}_segments"] = 0
+            literature_scores[mode] = 0.0
+            patient_scores[mode] = 0.0
+            stats[f"{mode}_segments_patient"] = 0
+            stats[f"{mode}_total_weighted_score"] = 0
+            stats[f"{mode}_max_possible_score_patient"] = 0
             stats[f"{mode}_mean_obstruction"] = 0.0
 
     # Save statistics if paths provided
@@ -324,14 +445,25 @@ def compute_mastora_scores(
             if not patient_stats_path.exists():
                 _initialize_mastora_stats_csv(patient_stats_path)
             _append_mastora_stats_to_csv(
-                patient_stats_path, patient_id, scores, stats, obstruction_attr
+                patient_stats_path,
+                patient_id,
+                literature_scores,
+                patient_scores,
+                stats,
+                obstruction_attr,
             )
 
         if global_stats_path:
             if not global_stats_path.exists():
                 _initialize_mastora_stats_csv(global_stats_path)
             _append_mastora_stats_to_csv(
-                global_stats_path, patient_id, scores, stats, obstruction_attr
+                global_stats_path,
+                patient_id,
+                literature_scores,
+                patient_scores,
+                stats,
+                obstruction_attr,
             )
 
-    return scores
+    # Return literature scores for backward compatibility
+    return literature_scores

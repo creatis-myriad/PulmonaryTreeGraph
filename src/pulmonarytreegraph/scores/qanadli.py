@@ -122,14 +122,20 @@ def _initialize_qanadli_stats_csv(output_path: Path) -> None:
         writer.writerow(
             [
                 "patient_id",
-                "qanadli_score",
                 "obstruction_attr",
                 "total_segments",
                 "obstructed_segments",
                 "total_obstruction_segments",
                 "partial_obstruction_segments",
                 "total_weighted_score",
-                "max_possible_score",
+                # Literature Qanadli (fixed 40 points max)
+                "qanadli_literature_score",
+                "qanadli_literature_score_pct",
+                "max_possible_score_literature",
+                # Patient-specific Qanadli (dynamic max based on actual segments)
+                "qanadli_patient_score",
+                "qanadli_patient_score_pct",
+                "max_possible_score_patient",
             ]
         )
 
@@ -137,7 +143,8 @@ def _initialize_qanadli_stats_csv(output_path: Path) -> None:
 def _append_qanadli_stats_to_csv(
     output_path: Path,
     patient_id: str,
-    qanadli_score: float,
+    qanadli_literature_score: float,
+    qanadli_patient_score: float,
     stats: dict,
     obstruction_attr: str = "volumetric_obstruction",
 ) -> None:
@@ -150,14 +157,20 @@ def _append_qanadli_stats_to_csv(
         writer.writerow(
             [
                 patient_id_clean,
-                f"{qanadli_score:.6f}",
                 obstruction_attr,
                 stats["total_segments"],
                 stats["obstructed_segments"],
                 stats["total_obstruction_segments"],
                 stats["partial_obstruction_segments"],
                 stats["total_weighted_score"],
-                stats["max_possible_score"],
+                # Literature scores
+                f"{qanadli_literature_score:.6f}",
+                f"{qanadli_literature_score * 100:.2f}",
+                stats["max_possible_score_literature"],
+                # Patient-specific scores
+                f"{qanadli_patient_score:.6f}",
+                f"{qanadli_patient_score * 100:.2f}",
+                stats["max_possible_score_patient"],
             ]
         )
 
@@ -179,7 +192,7 @@ def compute_qanadli_score(
     debug: bool = False,
 ) -> float | tuple[float, dict]:
     """
-    Compute the Qanadli score for a directed graph with embolism information.
+    Compute both literature and patient-specific Qanadli scores for a directed graph.
 
     Args:
         graph: Directed graph representing the arterial tree
@@ -193,7 +206,7 @@ def compute_qanadli_score(
         debug: If True, return debug information for visualization
 
     Returns:
-        float or tuple: Qanadli score (0-1) or (score, debug_info) if debug=True
+        float or tuple: Literature Qanadli score (0-1) or (score, debug_info) if debug=True
 
     Algorithm:
         1. Traverse graph from root using depth-first search
@@ -201,7 +214,9 @@ def compute_qanadli_score(
            - If obstruction > partial_thresh: count all descendant segments as obstructed
            - If terminal segment: count as 1 segment
            - Otherwise: continue recursion
-        3. Compute weighted score: sum(obstruction_degree * segment_count) / (2 * total_segments)
+        3. Compute two versions:
+           - Literature: weighted_score / 40 (fixed 20 segments × 2 max degree)
+           - Patient-specific: weighted_score / (2 × actual_segments)
     """
 
     # Data structures to save data for each selected edge
@@ -229,7 +244,7 @@ def compute_qanadli_score(
             ] = f"{level_name}: {obstruction:.3f} (n_seg:{descendant_segments_count}, deg:{degree})"
 
     def _depth_first_search(node: int) -> None:
-        """Recursive DFS traversal."""
+        """Recursive DFS traversal with subsegmental handling."""
         for child in graph.successors(node):
             edge_attrs = graph.edges[node, child]
             artery_obstruction = edge_attrs.get(obstruction_attr, 0.0)
@@ -241,9 +256,20 @@ def compute_qanadli_score(
                 )
                 continue
 
+            # Handle subsegmental PEs (level > terminal_level) with fixed 1 point
             if (
+                artery_level == terminal_level + 1
+                and artery_obstruction > partial_obstruction_thresh
+            ):
+                # Isolated subsegmental PE gets exactly 1 point regardless of degree
+                logger.debug(f"Subsegmental PE at level {artery_level}: fixed 1 point")
+                _store_edge_data((node, child), 1.0, 1, artery_level)  # Force degree=1
+                # Continue recursion to check for more subsegmental PEs
+                _depth_first_search(child)
+
+            elif (
                 artery_level <= terminal_level
-            ):  # Only consider arteries of segmental level or above
+            ):  # Original logic for segmental and above
                 if artery_obstruction > partial_obstruction_thresh:
                     # If artery is obstructed enough:
                     # - Count the whole subtree as obstructed to the same degree
@@ -267,6 +293,9 @@ def compute_qanadli_score(
                 else:
                     # Recursively visit children
                     _depth_first_search(child)
+            else:
+                # Non-obstructed subsegmental: continue recursion
+                _depth_first_search(child)
 
     # Find root and start DFS
     try:
@@ -276,7 +305,7 @@ def compute_qanadli_score(
         logger.error(f"Cannot compute Qanadli score: {e}")
         return 0.0 if not debug else (0.0, {})
 
-    # Compute score from collected data
+    # Compute score with both normalization methods
     if not obstructions:
         logger.warning("No segments found for Qanadli score computation")
         return 0.0 if not debug else (0.0, {})
@@ -284,19 +313,40 @@ def compute_qanadli_score(
     obstructions_vals = list(obstructions.values())
     descendant_segments_counts_vals = list(descendant_segments_counts.values())
 
-    # Discretize obstruction values into degrees: 0 (no), 1 (partial), 2 (total)
-    degrees = np.digitize(
-        obstructions_vals, [partial_obstruction_thresh, total_obstruction_thresh]
-    )
+    # Handle subsegmental PEs: force degree=1 for obstruction values that were set to 1.0
+    degrees = []
+    for obs in obstructions_vals:
+        if obs == 1.0:  # Subsegmental PE marker
+            degrees.append(1)  # Fixed degree for subsegmental
+        else:
+            # Normal discretization for segmental and above
+            degree = np.digitize(
+                [obs], [partial_obstruction_thresh, total_obstruction_thresh]
+            )[0]
+            degrees.append(degree)
+
+    degrees = np.array(degrees)
 
     # Compute weighted score
     weighted_degrees = np.array(descendant_segments_counts_vals) * degrees
     total_weighted_score = np.sum(weighted_degrees)
     total_segments = np.sum(descendant_segments_counts_vals)
-    max_possible_score = 2 * total_segments
 
-    # Qanadli score (normalized to 0-1)
-    score = total_weighted_score / max_possible_score if max_possible_score > 0 else 0.0
+    # Compute both normalization methods
+    max_possible_score_literature = 40  # Fixed 20 segments × 2 max degree
+    max_possible_score_patient = 2 * total_segments  # Dynamic based on actual segments
+
+    # Qanadli scores (normalized to 0-1)
+    qanadli_literature_score = (
+        total_weighted_score / max_possible_score_literature
+        if max_possible_score_literature > 0
+        else 0.0
+    )
+    qanadli_patient_score = (
+        total_weighted_score / max_possible_score_patient
+        if max_possible_score_patient > 0
+        else 0.0
+    )
 
     # Statistics for CSV output
     stats = {
@@ -305,30 +355,49 @@ def compute_qanadli_score(
         "partial_obstruction_segments": int(np.sum(degrees == 1)),
         "total_obstruction_segments": int(np.sum(degrees == 2)),
         "total_weighted_score": int(total_weighted_score),
-        "max_possible_score": int(max_possible_score),
+        "max_possible_score_literature": int(max_possible_score_literature),
+        "max_possible_score_patient": int(max_possible_score_patient),
     }
 
-    logger.info(f"Qanadli score: {score:.4f}")
-    logger.info(f"  Total segments: {stats['total_segments']}")
+    logger.info(
+        f"Qanadli Literature Score: {qanadli_literature_score:.4f} ({qanadli_literature_score * 100:.1f}%)"
+    )
+    logger.info(
+        f"Qanadli Patient Score: {qanadli_patient_score:.4f} ({qanadli_patient_score * 100:.1f}%)"
+    )
+    logger.info(f"  Total segments: {stats['total_segments']} (literature assumes 20)")
     logger.info(f"  Obstructed segments: {stats['obstructed_segments']}")
     logger.info(f"  Partial obstructions: {stats['partial_obstruction_segments']}")
     logger.info(f"  Total obstructions: {stats['total_obstruction_segments']}")
+    logger.info(f"  Weighted score: {stats['total_weighted_score']}")
 
     # Save statistics if paths provided
     if patient_id and patient_stats_path:
         if not patient_stats_path.exists():
             _initialize_qanadli_stats_csv(patient_stats_path)
         _append_qanadli_stats_to_csv(
-            patient_stats_path, patient_id, score, stats, obstruction_attr
+            patient_stats_path,
+            patient_id,
+            qanadli_literature_score,
+            qanadli_patient_score,
+            stats,
+            obstruction_attr,
         )
 
     if patient_id and global_stats_path:
         if not global_stats_path.exists():
             _initialize_qanadli_stats_csv(global_stats_path)
         _append_qanadli_stats_to_csv(
-            global_stats_path, patient_id, score, stats, obstruction_attr
+            global_stats_path,
+            patient_id,
+            qanadli_literature_score,
+            qanadli_patient_score,
+            stats,
+            obstruction_attr,
         )
 
     if debug:
-        return score, debug_info
-    return score
+        return qanadli_literature_score, debug_info
+
+    # Return the literature score as the main score (for backward compatibility)
+    return qanadli_literature_score
