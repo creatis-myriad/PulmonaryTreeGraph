@@ -9,19 +9,59 @@ import logging
 import os
 import sys
 import time
+from pathlib import Path
 
 from pulmonarytreegraph.scores.compute_scores import compute_literature_scores
 from pulmonarytreegraph.utils.io import load_graph
 
 
-def setup_logging(log_level: str = "INFO"):
-    """Setup logging for scoring."""
+def setup_logging(log_level: str = "INFO", output_dir: str = None):
+    """
+    Setup logging for scoring with both console and file output.
+
+    Args:
+        log_level: Logging level (DEBUG, INFO, WARNING, ERROR)
+        output_dir: Base output directory for log files
+    """
     log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    logging.basicConfig(
-        level=getattr(logging, log_level.upper()),
-        format=log_format,
-        handlers=[logging.StreamHandler(sys.stdout)],
-    )
+
+    # Create root logger
+    logger = logging.getLogger()
+    logger.setLevel(getattr(logging, log_level.upper()))
+
+    # Clear any existing handlers
+    logger.handlers.clear()
+
+    # Console handler (always present)
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(getattr(logging, log_level.upper()))
+    console_formatter = logging.Formatter(log_format)
+    console_handler.setFormatter(console_formatter)
+    logger.addHandler(console_handler)
+
+    # File handler (if output directory provided)
+    if output_dir:
+        # Create logs directory
+        logs_dir = Path(output_dir) / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+
+        # Generate log filename with timestamp
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        log_filename = f"scores_{timestamp}.log"
+        log_file_path = logs_dir / log_filename
+
+        # File handler
+        file_handler = logging.FileHandler(log_file_path, mode="w", encoding="utf-8")
+        file_handler.setLevel(getattr(logging, log_level.upper()))
+        file_formatter = logging.Formatter(log_format)
+        file_handler.setFormatter(file_formatter)
+        logger.addHandler(file_handler)
+
+        print(f"Logs will be saved to: {log_file_path}")
+
+        return str(log_file_path)
+
+    return None
 
 
 def find_enriched_graphs(input_path: str) -> list[dict]:
@@ -212,6 +252,12 @@ Examples:
         help="Path to enriched graph file or directory containing enriched graphs",
     )
 
+    # Output
+    parser.add_argument(
+        "--output-dir",
+        help="Output directory for logs and results (default: parent of input directory)",
+    )
+
     # Score selection
     parser.add_argument(
         "--compute-qanadli",
@@ -253,8 +299,18 @@ Examples:
 
     args = parser.parse_args()
 
-    # Setup logging
-    setup_logging(args.log_level)
+    # Determine output directory
+    if args.output_dir:
+        output_dir = args.output_dir
+    elif os.path.isfile(args.input):
+        # Single file: use the directory containing the file
+        output_dir = os.path.dirname(args.input)
+    else:
+        # Directory: use the input directory itself
+        output_dir = args.input.rstrip("/")
+
+    # Setup logging with file output
+    log_file_path = setup_logging(args.log_level, output_dir)
     logger = logging.getLogger(__name__)
 
     # Handle --compute-all-scores
@@ -269,6 +325,9 @@ Examples:
     logger.info("Literature Scores Computation")
     logger.info("=" * 50)
     logger.info(f"Input: {args.input}")
+    logger.info(f"Output directory: {output_dir}")
+    if log_file_path:
+        logger.info(f"Log file: {log_file_path}")
     logger.info(f"Obstruction attribute: {args.obstruction_attr}")
     logger.info(f"Qanadli score: {args.compute_qanadli}")
     logger.info(f"Mastora scores: {args.compute_mastora}")
@@ -331,6 +390,8 @@ Examples:
         logger.info(f"Failed: {len(failed)}")
         logger.info(f"Skipped: {len(skipped)}")
         logger.info(f"Total time: {total_time:.1f} seconds")
+        if log_file_path:
+            logger.info(f"Detailed logs saved to: {log_file_path}")
 
         if failed:
             logger.info("\nFailed patients:")

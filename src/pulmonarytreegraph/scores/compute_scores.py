@@ -73,15 +73,17 @@ def compute_literature_scores(
     # Qanadli Score
     if compute_qanadli:
         try:
-            qanadli = compute_qanadli_score(
+            qanadli_literature_score, qanadli_patient_score = compute_qanadli_score(
                 enriched_graph,
                 patient_id=patient_id,
                 patient_stats_path=patient_qanadli_path,
                 global_stats_path=global_qanadli_path,
                 obstruction_attr=obstruction_attr,
             )
-            scores["qanadli"] = qanadli
-            logger.info(f"Qanadli score: {qanadli:.4f}")
+            scores["qanadli_literature"] = qanadli_literature_score
+            scores["qanadli_patient"] = qanadli_patient_score
+            logger.info(f"Qanadli literature score: {qanadli_literature_score:.4f}")
+            logger.info(f"Qanadli patient score: {qanadli_patient_score:.4f}")
 
         except Exception as e:
             logger.error(f"Error computing Qanadli score: {e}")
@@ -90,7 +92,7 @@ def compute_literature_scores(
     # Mastora Scores (all variants)
     if compute_mastora:
         try:
-            mastora_scores = compute_mastora_scores(
+            mastora_literature_scores, mastora_patient_scores = compute_mastora_scores(
                 enriched_graph,
                 patient_id=patient_id,
                 patient_stats_path=patient_mastora_path,
@@ -99,18 +101,38 @@ def compute_literature_scores(
             )
 
             # Add all Mastora variants to scores
-            scores["mastora_central"] = mastora_scores["central"]
-            scores["mastora_peripheral"] = mastora_scores["peripheral"]
-            scores["mastora_global"] = mastora_scores["global"]
+            scores["mastora_central_literature"] = mastora_literature_scores["central"]
+            scores["mastora_peripheral_literature"] = mastora_literature_scores[
+                "peripheral"
+            ]
+            scores["mastora_global_literature"] = mastora_literature_scores["global"]
+            scores["mastora_central_patient"] = mastora_patient_scores["central"]
+            scores["mastora_peripheral_patient"] = mastora_patient_scores["peripheral"]
+            scores["mastora_global_patient"] = mastora_patient_scores["global"]
 
-            logger.info(f"Mastora central score: {mastora_scores['central']:.4f}")
-            logger.info(f"Mastora peripheral score: {mastora_scores['peripheral']:.4f}")
-            logger.info(f"Mastora global score: {mastora_scores['global']:.4f}")
+            logger.info(
+                f"Mastora central score: {mastora_literature_scores['central']:.4f}"
+            )
+            logger.info(
+                f"Mastora peripheral score: {mastora_literature_scores['peripheral']:.4f}"
+            )
+            logger.info(
+                f"Mastora global score: {mastora_literature_scores['global']:.4f}"
+            )
+            logger.info(
+                f"Mastora central patient score: {mastora_patient_scores['central']:.4f}"
+            )
+            logger.info(
+                f"Mastora peripheral patient score: {mastora_patient_scores['peripheral']:.4f}"
+            )
+            logger.info(
+                f"Mastora global patient score: {mastora_patient_scores['global']:.4f}"
+            )
 
         except Exception as e:
             logger.error(f"Error computing Mastora scores: {e}")
-            scores["mastora_central"] = 0.0
-            scores["mastora_peripheral"] = 0.0
-            scores["mastora_global"] = 0.0
+            scores["mastora_central_literature"] = 0.0
+            scores["mastora_peripheral_literature"] = 0.0
+            scores["mastora_global_literature"] = 0.0
 
     return scores
