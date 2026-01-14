@@ -398,7 +398,7 @@ def compute_mastora_scores(
             # Recalculate for patient score (we need both calculations)
             levels_to_search = {
                 "central": ArteryLevel.ALL_CENTRAL,  # {1, 2, 3}
-                "peripheral": ArteryLevel.SEGMENTAL,  # {4}
+                "peripheral": {ArteryLevel.SEGMENTAL},  # {4}
                 "global": ArteryLevel.ALL_LEVELS,  # {1, 2, 3, 4}
             }[mode]
 
@@ -465,5 +465,4 @@ def compute_mastora_scores(
                 obstruction_attr,
             )
 
-    # Return literature scores for backward compatibility
-    return literature_scores
+    return literature_scores, patient_scores
