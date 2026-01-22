@@ -796,7 +796,7 @@ def create_colored_embolism_masks(
             coordinates = embolism["coordinates"]
 
             # Color with the embolism ID directly (starting from 1 for visibility)
-            color_value = embolism_id + 1
+            color_value = embolism_id
             for coord in coordinates:
                 colored_mask[coord[0], coord[1], coord[2]] = color_value
 

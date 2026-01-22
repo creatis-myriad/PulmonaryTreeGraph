@@ -7,7 +7,12 @@ from typing import Any
 
 import numpy as np
 
-from ..emboli.embolie_analysis import analyze_embolisms_with_visualization
+from ..emboli.embolie_analysis import (
+    _append_enriched_embolism_stats_to_csv,
+    _initialize_enriched_embolism_stats_csv,
+    analyze_embolisms_with_visualization,
+    redistribute_embolism_anatomical_data,
+)
 from ..graph.graph_cleaning import clean_graph
 from ..graph.graph_construction import mask_to_branch_graph
 from ..graph.graph_labelling import label_graph
@@ -244,7 +249,7 @@ def clean_vessel_graph(
     coordinate_format: str = "both",
     save_skeleton: bool = False,
     save_colored_volumes: list[str] | None = None,
-    save_cycle_skeletons: bool = False,  # NEW PARAMETER
+    save_cycle_skeletons: bool = False,
 ) -> dict[str, Any]:
     """
     Clean a graph by removing suspicious edges and short/thin branches.
@@ -928,9 +933,13 @@ def analyze_embolisms_complete(
     compute_qanadli: bool = False,
     compute_mastora: bool = False,
     obstruction_attr: str = "volumetric_obstruction",
+    compute_tev_analysis: bool = True,
+    enrich_embolism_anatomy: bool = True,
+    use_existing_enriched_graph: bool = True,
 ) -> dict[str, Any]:
     """
     Embolism analysis pipeline with vessel graph enrichment using integrate_embolism_into_graph.
+    Can use existing enriched graph and metrics to speed up processing.
     """
     logger.info("=" * 50)
     logger.info("EMBOLISM ANALYSIS PIPELINE")
@@ -944,6 +953,12 @@ def analyze_embolisms_complete(
     try:
         os.makedirs(output_dir, exist_ok=True)
 
+        # Setup global statistics paths
+        results_base_dir = Path(output_dir).parent
+        global_enriched_embolism_stats_path = (
+            results_base_dir / "global_embolism_statistics_enriched.csv"
+        )
+
         # Step 1: Basic embolism analysis
         logger.info("STEP 1: Basic embolism analysis")
         basic_results = analyze_embolisms_with_visualization(
@@ -953,6 +968,7 @@ def analyze_embolisms_complete(
             separation_method=separation_method,
             fusion_threshold=fusion_threshold,
             include_colored_masks=include_colored_masks,
+            global_stats_path=None,
         )
 
         if basic_results["num_embolisms"] == 0:
@@ -961,82 +977,213 @@ def analyze_embolisms_complete(
                 **basic_results,
                 "analysis_type": "basic_only",
                 "vessel_analysis_performed": False,
+                "tev_analysis_performed": False,
+                "embolism_anatomy_enriched": False,
                 "reason": "no_embolisms_detected",
             }
 
-        # Step 2: Vessel graph enrichment
-        if not vessel_graph_path or not vessel_mask_path:
-            logger.warning("Vessel data not provided - returning basic results only")
-            return {
-                **basic_results,
-                "analysis_type": "basic_only",
-                "vessel_analysis_performed": False,
-                "reason": "missing_vessel_data",
-            }
+        # Check if we can use existing enriched data
+        existing_enriched_graph_path = os.path.join(output_dir, "enriched_graph.json")
 
-        logger.info("STEP 2: Vessel graph enrichment")
-        vessel_graph = load_graph(vessel_graph_path)
-        vessel_mask_data, _, vessel_spacing, _ = load_niftii(
-            vessel_mask_path, "vessel_volume"
+        can_use_existing = (
+            use_existing_enriched_graph
+            and os.path.exists(existing_enriched_graph_path)
+            and os.path.exists(basic_results["output_files"]["metrics"])
         )
 
-        enriched_graph = integrate_embolism_into_graph(
-            vessel_graph,
-            vessel_mask_data,
-            basic_results["embolism_objects"],
-            vessel_spacing,
-        )
-
-        # Step 3: Optional transversal obstruction computation
-        if compute_transversal_obstruction:
-            logger.info("Computing transversal obstruction for vessel segments...")
-            # Load the embolism mask as obstruction_mask
-            obstruction_mask_data, _, _, _ = load_niftii(embolism_mask_path, "embolism")
-            enriched_graph = full_graph_transversal_obstructions(
-                vessel_mask=vessel_mask_data,
-                obstruction_mask=obstruction_mask_data,
-                vessel_graph=enriched_graph,
-                vessel_mask_by_segment=True,
-                **(transversal_obstruction_kwargs or {}),
+        if can_use_existing:
+            logger.info(
+                "STEP 2-4: Using existing enriched graph - redistributing anatomical data"
             )
-            logger.info("Transversal obstruction computation completed.")
 
-        # Save the enriched graph
-        if coordinate_format == "both":
-            base_path = os.path.join(output_dir, "enriched_graph")
-            voxel_path, real_path = save_graph_dual_format(
-                enriched_graph, base_path, vessel_mask_path
-            )
-            enriched_graph_paths = {"voxel": voxel_path, "real": real_path}
-        elif coordinate_format == "real":
-            enriched_graph_path = os.path.join(
-                output_dir, "enriched_graph_real_coords.json"
-            )
-            save_graph_with_real_coordinates(
-                enriched_graph, enriched_graph_path, vessel_mask_path
-            )
-            enriched_graph_paths = {"real": enriched_graph_path}
-        else:
-            enriched_graph_path = os.path.join(output_dir, "enriched_graph.json")
-            save_graph(enriched_graph, enriched_graph_path)
-            enriched_graph_paths = {"voxel": enriched_graph_path}
+            try:
+                anatomical_results = redistribute_embolism_anatomical_data(
+                    enriched_graph_path=existing_enriched_graph_path,
+                    embolism_metrics_path=basic_results["output_files"]["metrics"],
+                    patient_name=patient_name,
+                    output_dir=output_dir,
+                    force_recompute=False,
+                )
 
-        logger.info("Enriched vessel graph saved: %s", enriched_graph_paths)
+                # Update paths
+                enriched_graph_paths = {"voxel": existing_enriched_graph_path}
+                enriched_embolism_metrics_path = anatomical_results[
+                    "enriched_metrics_path"
+                ]
+                tev_results = anatomical_results["tev_statistics"]
 
-        # Step 4: Compute literature scores
+                logger.info(
+                    "Successfully redistributed anatomical data from existing enriched graph"
+                )
+
+                # Save to global CSVs
+                if enriched_embolism_metrics_path and os.path.exists(
+                    enriched_embolism_metrics_path
+                ):
+                    enriched_df = anatomical_results["enriched_dataframe"]
+
+                    if not global_enriched_embolism_stats_path.exists():
+                        _initialize_enriched_embolism_stats_csv(
+                            global_enriched_embolism_stats_path
+                        )
+
+                    _append_enriched_embolism_stats_to_csv(
+                        global_enriched_embolism_stats_path,
+                        enriched_df,
+                        patient_name,
+                        separation_method,
+                        fusion_threshold,
+                    )
+                    logger.debug(
+                        "Appended enriched embolism statistics to global CSV, path: %s",
+                        str(global_enriched_embolism_stats_path),
+                    )
+
+            except Exception as e:
+                logger.warning(f"Failed to use existing enriched graph: {e}")
+                logger.info("Falling back to full vessel graph enrichment...")
+                can_use_existing = False
+
+        if not can_use_existing:
+            # Original pathway - create enriched graph from scratch
+            # Step 2: Vessel graph enrichment
+            if not vessel_graph_path or not vessel_mask_path:
+                logger.warning(
+                    "Vessel data not provided - returning basic results only"
+                )
+                return {
+                    **basic_results,
+                    "analysis_type": "basic_only",
+                    "vessel_analysis_performed": False,
+                    "tev_analysis_performed": False,
+                    "embolism_anatomy_enriched": False,
+                    "reason": "missing_vessel_data",
+                }
+
+            logger.info("STEP 2: Vessel graph enrichment")
+            vessel_graph = load_graph(vessel_graph_path)
+            vessel_mask_data, _, vessel_spacing, _ = load_niftii(
+                vessel_mask_path, "vessel_volume"
+            )
+
+            enriched_graph = integrate_embolism_into_graph(
+                vessel_graph,
+                vessel_mask_data,
+                basic_results["embolism_objects"],
+                vessel_spacing,
+            )
+
+            # Step 3: Optional transversal obstruction computation
+            if compute_transversal_obstruction:
+                logger.info("Computing transversal obstruction for vessel segments...")
+                obstruction_mask_data, _, _, _ = load_niftii(
+                    embolism_mask_path, "embolism"
+                )
+                enriched_graph = full_graph_transversal_obstructions(
+                    vessel_mask=vessel_mask_data,
+                    obstruction_mask=obstruction_mask_data,
+                    vessel_graph=enriched_graph,
+                    vessel_mask_by_segment=True,
+                    **(transversal_obstruction_kwargs or {}),
+                )
+                logger.info("Transversal obstruction computation completed.")
+
+            # Save the enriched graph
+            if coordinate_format == "both":
+                base_path = os.path.join(output_dir, "enriched_graph")
+                voxel_path, real_path = save_graph_dual_format(
+                    enriched_graph, base_path, vessel_mask_path
+                )
+                enriched_graph_paths = {"voxel": voxel_path, "real": real_path}
+            elif coordinate_format == "real":
+                enriched_graph_path = os.path.join(
+                    output_dir, "enriched_graph_real_coords.json"
+                )
+                save_graph_with_real_coordinates(
+                    enriched_graph, enriched_graph_path, vessel_mask_path
+                )
+                enriched_graph_paths = {"real": enriched_graph_path}
+            else:
+                enriched_graph_path = os.path.join(output_dir, "enriched_graph.json")
+                save_graph(enriched_graph, enriched_graph_path)
+                enriched_graph_paths = {"voxel": enriched_graph_path}
+
+            logger.info("Enriched vessel graph saved: %s", enriched_graph_paths)
+
+            # Step 4-5: Use simplified redistribution
+            logger.info(
+                "STEP 4-5: Computing anatomical distribution and TEV statistics"
+            )
+
+            try:
+                anatomical_results = redistribute_embolism_anatomical_data(
+                    enriched_graph_path=enriched_graph_paths["voxel"]
+                    if "voxel" in enriched_graph_paths
+                    else list(enriched_graph_paths.values())[0],
+                    embolism_metrics_path=basic_results["output_files"]["metrics"],
+                    patient_name=patient_name,
+                    output_dir=output_dir,
+                    force_recompute=True,  # Force recompute since we just created the graph
+                )
+
+                enriched_embolism_metrics_path = anatomical_results[
+                    "enriched_metrics_path"
+                ]
+                tev_results = anatomical_results["tev_statistics"]
+
+                # Save to global CSVs (same logic as above)
+                if enriched_embolism_metrics_path and os.path.exists(
+                    enriched_embolism_metrics_path
+                ):
+                    enriched_df = anatomical_results["enriched_dataframe"]
+
+                    if not global_enriched_embolism_stats_path.exists():
+                        _initialize_enriched_embolism_stats_csv(
+                            global_enriched_embolism_stats_path
+                        )
+
+                    _append_enriched_embolism_stats_to_csv(
+                        global_enriched_embolism_stats_path,
+                        enriched_df,
+                        patient_name,
+                        separation_method,
+                        fusion_threshold,
+                    )
+                    logger.debug(
+                        "Appended enriched embolism statistics to global CSV, path: %s",
+                        str(global_enriched_embolism_stats_path),
+                    )
+
+            except Exception as e:
+                logger.error(f"Error in anatomical redistribution: {e}")
+                enriched_embolism_metrics_path = None
+                tev_results = {}
+
+        # Step 6: Compute literature scores (if requested)
         enriched_graph_results = {
             **basic_results,
             "analysis_type": "enrichment",
             "vessel_analysis_performed": True,
+            "tev_analysis_performed": bool(tev_results),
+            "embolism_anatomy_enriched": enriched_embolism_metrics_path is not None,
             "enriched_graph_paths": enriched_graph_paths,
-            "_enriched_graph_object": enriched_graph,
+            "enriched_embolism_metrics_path": enriched_embolism_metrics_path,
+            "tev_statistics": tev_results,
+            "used_existing_enriched_graph": can_use_existing,
         }
 
         if (compute_qanadli or compute_mastora) and compute_vessel_analysis:
             logger.info("Computing literature-based obstruction scores...")
             try:
+                # Load enriched graph for score computation
+                enriched_graph_for_scores = load_graph(
+                    enriched_graph_paths["voxel"]
+                    if "voxel" in enriched_graph_paths
+                    else list(enriched_graph_paths.values())[0]
+                )
+
                 scores = compute_literature_scores(
-                    enriched_graph,
+                    enriched_graph_for_scores,
                     output_dir,
                     patient_id=patient_name,
                     compute_qanadli=compute_qanadli,
@@ -1044,7 +1191,6 @@ def analyze_embolisms_complete(
                     obstruction_attr=obstruction_attr,
                 )
 
-                # Add scores to results
                 for score_name, score_value in scores.items():
                     enriched_graph_results[f"{score_name}_score"] = score_value
 
