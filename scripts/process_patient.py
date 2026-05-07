@@ -230,10 +230,11 @@ def main():
         help="Artery mask file path (e.g. data/0001_arteries.nii.gz)",
     )
     parser.add_argument(
-        "--lung-masks-dir", required=True, help="Directory containing lung mask files"
+        "--lung-masks-dir", required=False, help="Directory containing lung mask files"
     )
     parser.add_argument(
         "--embolism-mask",
+        required=False,
         help="Embolism mask file path (e.g. data/0001_embolisms.nii.gz)",
     )
 
