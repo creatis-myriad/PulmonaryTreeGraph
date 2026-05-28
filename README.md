@@ -86,10 +86,12 @@ These options are grouped by purpose to make it easier to configure batch runs.
 #### Input / Output
 
 - `--data-dir`: Base directory containing `arteries_mask/`, `embolie_mask/`, `images/`, and `lungs_mask/`.
-- `--arteries-dir`: Path to the artery masks folder.
-- `--embolies-dir`: Path to the embolism masks folder.
-- `--images-dir`: Path to the original images folder.
-- `--lungs-dir`: Path to the lung masks folder.
+  - If `--data-dir` is used, the script automatically builds the four per-type paths from it.
+  - In this case, `--arteries-dir`, `--embolies-dir`, `--images-dir`, and `--lungs-dir` are not required.
+- `--arteries-dir`: Path to the artery masks folder. Optional when `--data-dir` is provided.
+- `--embolies-dir`: Path to the embolism masks folder. Optional when `--data-dir` is provided.
+- `--images-dir`: Path to the original images folder. Optional; current batch logic uses image files only for metadata/logging and does not require them to run the pipeline.
+- `--lungs-dir`: Path to the lung masks folder. Optional when `--data-dir` is provided.
 - `--output-dir`: Base output directory for all patients (default: `batch_results`).
 
 #### Patient selection
