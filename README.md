@@ -94,9 +94,71 @@ Use `batch_process_patients.py` for processing multiple patients:
 # Process all patients in a directory structure
 python scripts/batch_process_patients.py \
     --data-dir /path/to/patient/data/ \
-    --output-dir /path/to/results/ \
-    --pattern "patient_*_arteries.nii.gz"
+    --output-dir /path/to/results/
 ```
+
+### Batch Processing Options
+
+These options are grouped by purpose to make it easier to configure batch runs.
+
+#### Input / Output
+
+- `--data-dir`: Base directory containing `arteries_mask/`, `embolie_mask/`, `images/`, and `lungs_mask/`.
+- `--arteries-dir`: Path to the artery masks folder.
+- `--embolies-dir`: Path to the embolism masks folder.
+- `--images-dir`: Path to the original images folder.
+- `--lungs-dir`: Path to the lung masks folder.
+- `--output-dir`: Base output directory for all patients (default: `batch_results`).
+
+#### Patient selection
+
+- `--patient-list`: Text file with patient IDs to process, one per line.
+- `--exclude-patients`: Space-separated list of patient IDs to exclude.
+- `--max-patients`: Maximum number of patients to process.
+- `--validate-only`: Only validate patient files and do not run the pipeline.
+
+#### Processing options
+
+- `--radius-ratio-threshold`: Threshold for radius ratio to remove thin branches (default: `0.3`).
+- `--diameter-threshold`: Minimum diameter ratio for trunk vessels (default: `0.5`).
+- `--length-threshold`: Maximum length/diameter ratio for trunk vessels (default: `1.5`).
+- `--coordinate-format`: Coordinate format for saved graphs: `voxel`, `real`, or `both` (default: `both`).
+- `--save-skeletons`: Save binary and edge_id skeletons at each step.
+- `--save-colored-volumes`: Save vessel volumes with specified coloring. Valid values: `edge_id`, `level`, `lobe`.
+- `--save-all-step-volumes`: Save vessel volumes at every processing step.
+- `--save-cycle-skeletons`: Save skeletons of detected cycles before and after cleaning.
+
+#### Embolism and enriched graph options
+
+- `--embolism-separation-method`: Method for separating embolisms: `connected_components` or `connected_components_with_threshold`.
+- `--embolism-fusion-threshold`: Distance threshold for fusing nearby embolism components (default: `5.0`).
+- `--save-enriched-graphs`: Save enriched graphs into a central `enriched_graphs` folder under the output directory.
+
+#### Literature scoring
+
+- `--compute-qanadli`: Compute Qanadli obstruction score.
+- `--compute-mastora`: Compute Mastora obstruction scores (central, peripheral, global).
+- `--compute-all-scores`: Compute all available literature scores (`--compute-qanadli` + `--compute-mastora`).
+- `--obstruction-attr`: Choose obstruction attribute for scoring: `volumetric_obstruction` or `transversal_obstruction_max` (default: `volumetric_obstruction`).
+
+#### Processing control
+
+- `--skip-steps`: Skip specific processing steps. Valid values: `preprocess`, `build`, `clean`, `orient`, `label`, `embolism`.
+- `--stop-after`: Stop processing after the specified step.
+- `--compute-transversal-obstruction`: Compute transversal obstruction metrics for each vessel segment.
+- `--cpr-padding`: Padding for CPR in transversal obstruction (default: `1.0`).
+
+#### Execution and logging
+
+- `--continue-on-error`: Continue processing other patients if one fails (default: `True`).
+- `--log-level`: Logging level: `DEBUG`, `INFO`, `WARNING`, or `ERROR` (default: `INFO`).
+
+#### Heatmap generation
+
+- `--generate-heatmaps`: Generate segment heatmaps after processing.
+- `--batch-name`: Name for the batch (used in heatmap titles, defaults to the output directory name).
+- `--comparison-batches`: List of other batch directories for comparison heatmaps.
+- `--scores-only`: Only compute literature scores from existing enriched graphs and skip the pipeline.
 
 ## Step-by-Step Pipeline
 
