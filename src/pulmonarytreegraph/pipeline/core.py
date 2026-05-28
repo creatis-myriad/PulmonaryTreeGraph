@@ -60,11 +60,13 @@ def preprocess_artery_mask(
         patient_name = os.path.basename(artery_path).replace(".nii.gz", "")
         output_dir = os.path.join("results", patient_name)
 
-    os.makedirs(output_dir, exist_ok=True)
+    # Create a dedicated subdirectory for preprocessing outputs
+    preprocessing_dir = os.path.join(output_dir, "1_preprocessing")
+    os.makedirs(preprocessing_dir, exist_ok=True)
 
     logger.info("Creating skeleton and distance map...")
     skeleton, distance_map = create_skeleton_and_distance_map(mask, spacing)
-    skeleton_path = os.path.join(output_dir, "skeleton.nii.gz")
+    skeleton_path = os.path.join(preprocessing_dir, "skeleton.nii.gz")
     save_mask(
         skeleton.astype(np.uint32),
         header,
@@ -73,7 +75,7 @@ def preprocess_artery_mask(
         mask_name="skeleton_original",
     )
     logger.info("Skeleton saved: %s", skeleton_path)
-    distance_map_path = os.path.join(output_dir, "distance_map.nii.gz")
+    distance_map_path = os.path.join(preprocessing_dir, "distance_map.nii.gz")
     save_mask(
         distance_map,
         header,
@@ -1311,9 +1313,10 @@ def process_patient_complete_pipeline(
             if stop_after == "preprocess":
                 return pipeline_results
         else:
-            # Define paths for skipped step
-            skeleton_path = os.path.join(output_dir, "skeleton.nii.gz")
-            distance_map_path = os.path.join(output_dir, "distance_map.nii.gz")
+            # Define paths for skipped step: look in preprocessing subfolder
+            preprocessing_dir = os.path.join(output_dir, "1_preprocessing")
+            skeleton_path = os.path.join(preprocessing_dir, "skeleton.nii.gz")
+            distance_map_path = os.path.join(preprocessing_dir, "distance_map.nii.gz")
 
         # Step 2: Build graph
         if "build" not in skip_steps:

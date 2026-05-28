@@ -165,7 +165,7 @@ python scripts/1_preprocess.py \
 
 **Output**:
 ```
-results/patient_001/
+results/patient_001/1_preprocessing/
 ├── skeleton.nii.gz         # 3D skeleton (centerlines) of vessels
 └── distance_map.nii.gz     # Distance transform for radius estimation
 ```
@@ -179,20 +179,20 @@ results/patient_001/
 ```bash
 # Build graph with both coordinate formats
 python scripts/2_build_graph.py \
-    --skeleton results/patient_001/skeleton.nii.gz \
-    --distance-map results/patient_001/distance_map.nii.gz
+    --skeleton results/patient_001/1_preprocessing/skeleton.nii.gz \
+    --distance-map results/patient_001/1_preprocessing/distance_map.nii.gz
 
 # With skeleton visualization and validation
 python scripts/2_build_graph.py \
-    --skeleton results/patient_001/skeleton.nii.gz \
-    --distance-map results/patient_001/distance_map.nii.gz \
+    --skeleton results/patient_001/1_preprocessing/skeleton.nii.gz \
+    --distance-map results/patient_001/1_preprocessing/distance_map.nii.gz \
     --save-skeleton \
     --detailed-validation
 
 # Specify coordinate format
 python scripts/2_build_graph.py \
-    --skeleton results/patient_001/skeleton.nii.gz \
-    --distance-map results/patient_001/distance_map.nii.gz \
+    --skeleton results/patient_001/1_preprocessing/skeleton.nii.gz \
+    --distance-map results/patient_001/1_preprocessing/distance_map.nii.gz \
     --coordinate-format real
 ```
 
@@ -379,8 +379,9 @@ After complete processing, the full output structure contains:
 
 ```
 results/patient_001/
-├── skeleton.nii.gz                       # Step 1: Preprocessing
-├── distance_map.nii.gz
+├── 1_preprocessing/
+│   ├── skeleton.nii.gz                   # Step 1: Preprocessing
+│   └── distance_map.nii.gz
 ├── branch_graph.json                     # Step 2: Graph construction
 ├── branch_graph_real_coords.json
 ├── cleaned_graph.json                    # Step 3: Graph cleaning
