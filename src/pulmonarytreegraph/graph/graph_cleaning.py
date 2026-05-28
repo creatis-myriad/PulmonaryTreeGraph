@@ -828,7 +828,6 @@ def remove_single_neighbor_nodes(graph: nx.Graph) -> nx.Graph:
     removed_count = 0
 
     while True:
-        # More efficient node removal logic
         nodes_to_remove = []
         for node in graph.nodes:
             if graph.degree(node) == 1:
@@ -1463,7 +1462,12 @@ def _remove_suspicious_cycle_edges(
     return len(removed_edges), cycle_tracking
 
 
-def _count_large_terminal_vessels(graph: nx.Graph, min_diameter: float = 10.0) -> int:
+def _count_large_terminal_vessels(
+    graph: nx.Graph,
+    min_diameter: float = 10.0,
+    central_only: bool = True,
+    centrality_threshold: float = 0.3,
+) -> int:
     """
     Count terminal vessels with diameter above threshold for safety validation.
 
@@ -1474,13 +1478,16 @@ def _count_large_terminal_vessels(graph: nx.Graph, min_diameter: float = 10.0) -
     Args:
         graph: NetworkX graph to analyze
         min_diameter: Minimum mean diameter (mm) to consider vessel "large"
+        central_only: If True, only count vessels within centrality threshold
+        centrality_threshold: Maximum normalized distance from center (0-1 scale)
 
     Returns:
         int: Number of terminal vessels meeting diameter criteria
 
     Algorithm:
         1. Filter nodes to terminal nodes (degree == 1)
-        2. For each terminal node:
+        2. If central_only: Calculate image center and filter by distance
+        3. For each terminal node:
            - Get connecting edge data
            - Calculate mean diameter from edge mean_radius
            - Count if diameter >= threshold
@@ -1494,9 +1501,26 @@ def _count_large_terminal_vessels(graph: nx.Graph, min_diameter: float = 10.0) -
     Note:
         Threshold of 10.0 mm chosen to identify major pulmonary vessels
         that should be preserved regardless of other criteria.
+        When central_only=True, only anatomically central vessels count.
     """
     count = 0
     terminal_nodes = [node for node in graph.nodes if graph.degree(node) == 1]
+
+    # Calculate image center if central filtering is enabled
+    image_center = None
+    max_distance = None
+    if central_only and len(graph.nodes) > 0:
+        all_positions = [graph.nodes[n]["pos"] for n in graph.nodes]
+        center_x = np.mean([pos[0] for pos in all_positions])
+        center_y = np.mean([pos[1] for pos in all_positions])
+        image_center = (center_x, center_y)
+
+        # Calculate max distance among terminals for normalization
+        terminal_distances = []
+        for node in terminal_nodes:
+            distance = _calculate_axial_centrality(node, graph, image_center)
+            terminal_distances.append(distance)
+        max_distance = max(terminal_distances) if terminal_distances else 1.0
 
     for node in terminal_nodes:
         if graph.neighbors(node):  # Ensure it has a neighbor
@@ -1506,9 +1530,24 @@ def _count_large_terminal_vessels(graph: nx.Graph, min_diameter: float = 10.0) -
             mean_diameter = 2 * mean_radius
 
             if mean_diameter >= min_diameter:
+                # Apply centrality filter if enabled
+                if central_only and image_center is not None:
+                    distance = _calculate_axial_centrality(node, graph, image_center)
+                    normalized_distance = (
+                        distance / max_distance if max_distance > 0 else 0
+                    )
+
+                    if normalized_distance > centrality_threshold:
+                        logger.debug(
+                            f"Large terminal vessel excluded (too peripheral): node {node}, "
+                            f"diameter={mean_diameter:.2f}, normalized_distance={normalized_distance:.3f}"
+                        )
+                        continue  # Skip peripheral vessels
+
                 count += 1
                 logger.debug(
-                    f"Large terminal vessel found: node {node}, diameter={mean_diameter:.2f}"
+                    f"Large {'central ' if central_only else ''}terminal vessel found: "
+                    f"node {node}, diameter={mean_diameter:.2f}"
                 )
 
     return count
@@ -1516,25 +1555,26 @@ def _count_large_terminal_vessels(graph: nx.Graph, min_diameter: float = 10.0) -
 
 def _get_large_terminal_vessels(
     graph: nx.Graph, min_diameter: float = 10.0
-) -> list[tuple[int, float]]:
+) -> list[tuple[int, float, float]]:
     """
     Retrieve terminal vessels exceeding diameter threshold with their measurements.
 
     Similar to _count_large_terminal_vessels but returns detailed information
-    about each large terminal vessel including node ID and diameter. Used
-    for protective logic during aggressive cleaning operations.
+    about each large terminal vessel including node ID, diameter, and length.
+    Used for protective logic during aggressive cleaning operations.
 
     Args:
         graph: NetworkX graph to analyze
         min_diameter: Minimum mean diameter (mm) to consider vessel "large"
 
     Returns:
-        list: Tuples of (node_id, diameter) for each large terminal vessel
-              Sorted by diameter (largest first) when used in protection logic
+        list: Tuples of (node_id, diameter, length) for each large terminal vessel
+              Sorted by combined score (diameter × length) when used in protection logic
 
     Note:
         Enables targeted protection of specific large terminals during
         cleaning operations that might otherwise remove them.
+        Now includes length to help identify main trunk vessels.
     """
     large_terminals = []
     terminal_nodes = [node for node in graph.nodes if graph.degree(node) == 1]
@@ -1545,26 +1585,56 @@ def _get_large_terminal_vessels(
             edge_data = graph.edges[node, neighbor]
             mean_radius = edge_data.get("mean_radius", 0)
             mean_diameter = 2 * mean_radius
+            length = edge_data.get("length", 0)
 
             if mean_diameter >= min_diameter:
-                large_terminals.append((node, mean_diameter))
+                large_terminals.append((node, mean_diameter, length))
 
     return large_terminals
 
 
+def _calculate_axial_centrality(
+    node: int, graph: nx.Graph, image_center: tuple[float, float]
+) -> float:
+    """
+    Calculate distance from node to image center in axial plane (x, y).
+
+    Args:
+        node: Node ID to evaluate
+        graph: Graph containing node position data
+        image_center: (x, y) coordinates of image center
+
+    Returns:
+        float: Euclidean distance from node to center in axial plane
+    """
+    pos = graph.nodes[node]["pos"]
+    # Distance in axial plane (x, y), ignoring z
+    dx = pos[0] - image_center[0]
+    dy = pos[1] - image_center[1]
+    return np.sqrt(dx * dx + dy * dy)
+
+
 def _filter_removal_to_protect_largest(
-    to_remove: list[tuple[int, int, str]], large_terminals: list[tuple[int, float]]
+    to_remove: list[tuple[int, int, str]],
+    large_terminals: list[tuple[int, float, float]],
+    graph: nx.Graph,
+    prefer_central: bool = True,
+    centrality_threshold: float = 0.3,
 ) -> tuple[list[tuple[int, int, str]], int]:
     """
-    Filter branch removal list to protect the largest terminal vessel.
+    Filter branch removal list to protect the largest and longest central terminal vessel.
 
     This safety mechanism prevents over-aggressive cleaning by ensuring
-    the largest terminal vessel is never removed, even if it meets other
-    removal criteria. Critical for preserving anatomical integrity.
+    the best terminal vessel is never removed, using a combined score of
+    diameter and length, with preference for vessels near the image center
+    (anatomically more likely to be main trunk).
 
     Args:
         to_remove: List of (node, parent, edge_id) tuples marked for removal
-        large_terminals: List of (node, diameter) tuples for large terminals
+        large_terminals: List of (node, diameter, length) tuples for large terminals
+        graph: Graph containing node position data
+        prefer_central: If True, prefer vessels near image center
+        centrality_threshold: Maximum distance ratio from center (0-1 scale)
 
     Returns:
         tuple: (filtered_removal_list, protected_count)
@@ -1572,28 +1642,105 @@ def _filter_removal_to_protect_largest(
                protected_count is number of vessels protected
 
     Algorithm:
-        1. Sort large terminals by diameter (largest first)
-        2. Identify largest terminal vessel
-        3. Filter removal list to exclude largest terminal
-        4. Log protection action for verification
+        1. Calculate image center from all node positions
+        2. If prefer_central:
+           - Filter large terminals within centrality threshold
+           - Calculate combined score = diameter × length for each
+           - Select vessel with highest combined score
+           - Fall back to absolute best if no central vessels
+        3. Otherwise: Select vessel with highest combined score
+        4. Filter removal list to exclude selected vessel
+        5. Log protection action for verification
+
+    Selection Criteria:
+        Combined score = diameter (mm) × length (mm)
+        This favors vessels that are both thick AND long (main trunk characteristics)
 
     Safety Logic:
         Activated when cleaning would result in < 1 large terminal vessel
         remaining, ensuring anatomically important structures survive.
+        Centrality preference helps select main trunk over peripheral branches.
     """
     if not large_terminals:
         return to_remove, 0
 
-    # Sort by diameter (largest first) and get the largest
-    large_terminals.sort(key=lambda x: x[1], reverse=True)
-    largest_terminal_node = large_terminals[0][0]
-    largest_diameter = large_terminals[0][1]
+    # Calculate combined score for each terminal: diameter × length
+    # This favors vessels that are both large in diameter and long
+    terminals_with_score = []
+    for node, diameter, length in large_terminals:
+        combined_score = diameter * length
+        terminals_with_score.append((node, diameter, length, combined_score))
 
-    logger.info(
-        f"Protecting largest terminal vessel: node {largest_terminal_node} (diameter={largest_diameter:.2f})"
-    )
+    # Sort by combined score (highest first)
+    terminals_with_score.sort(key=lambda x: x[3], reverse=True)
 
-    # Filter out the largest terminal from removal list
+    if prefer_central and len(graph.nodes) > 0:
+        # Calculate image center in axial plane (x, y)
+        all_positions = [graph.nodes[n]["pos"] for n in graph.nodes]
+        center_x = np.mean([pos[0] for pos in all_positions])
+        center_y = np.mean([pos[1] for pos in all_positions])
+        image_center = (center_x, center_y)
+
+        # Calculate max distance for normalization
+        max_distance = max(
+            _calculate_axial_centrality(node, graph, image_center)
+            for node, _, _, _ in terminals_with_score
+        )
+
+        # Filter terminals within centrality threshold
+        central_terminals = []
+        for node, diameter, length, combined_score in terminals_with_score:
+            distance = _calculate_axial_centrality(node, graph, image_center)
+            normalized_distance = distance / max_distance if max_distance > 0 else 0
+
+            if normalized_distance <= centrality_threshold:
+                central_terminals.append(
+                    (node, diameter, length, combined_score, distance)
+                )
+                logger.debug(
+                    f"Central terminal candidate: node {node}, diameter={diameter:.2f}mm, "
+                    f"length={length:.2f}mm, score={combined_score:.1f}, "
+                    f"distance={distance:.1f}mm, normalized={normalized_distance:.3f}"
+                )
+
+        # Select best among central vessels (highest combined score), or absolute best if none central
+        if central_terminals:
+            # Sort by combined score (highest first)
+            central_terminals.sort(key=lambda x: x[3], reverse=True)
+            largest_terminal_node = central_terminals[0][0]
+            largest_diameter = central_terminals[0][1]
+            largest_length = central_terminals[0][2]
+            largest_score = central_terminals[0][3]
+            distance_from_center = central_terminals[0][4]
+            logger.info(
+                f"Protecting best CENTRAL terminal vessel: node {largest_terminal_node} "
+                f"(diameter={largest_diameter:.2f}mm, length={largest_length:.2f}mm, "
+                f"score={largest_score:.1f}, axial_distance={distance_from_center:.1f}mm, "
+                f"{len(central_terminals)} central candidates)"
+            )
+        else:
+            # No central vessels, fall back to absolute best by combined score
+            largest_terminal_node = terminals_with_score[0][0]
+            largest_diameter = terminals_with_score[0][1]
+            largest_length = terminals_with_score[0][2]
+            largest_score = terminals_with_score[0][3]
+            logger.warning(
+                f"No central vessels found within threshold. "
+                f"Protecting absolute best: node {largest_terminal_node} "
+                f"(diameter={largest_diameter:.2f}mm, length={largest_length:.2f}mm, score={largest_score:.1f})"
+            )
+    else:
+        # Default behavior: protect vessel with highest combined score
+        largest_terminal_node = terminals_with_score[0][0]
+        largest_diameter = terminals_with_score[0][1]
+        largest_length = terminals_with_score[0][2]
+        largest_score = terminals_with_score[0][3]
+        logger.info(
+            f"Protecting best terminal vessel: node {largest_terminal_node} "
+            f"(diameter={largest_diameter:.2f}mm, length={largest_length:.2f}mm, score={largest_score:.1f})"
+        )
+
+    # Filter out the selected terminal from removal list
     filtered_to_remove = []
     protected_count = 0
 
@@ -1648,12 +1795,12 @@ def _remove_artefact_branches(
         artifact removal with anatomical structure preservation.
     """
     try:
-        # Count large terminal vessels before cleaning
+        # Count large CENTRAL terminal vessels before cleaning
         initial_large_terminals = _count_large_terminal_vessels(
-            graph, min_diameter=10.0
+            graph, min_diameter=10.0, central_only=True, centrality_threshold=0.3
         )
         logger.info(
-            f"Initial large terminal vessels (diameter >= 10mm): {initial_large_terminals}"
+            f"Initial large CENTRAL terminal vessels (diameter >= 10mm, central 30%): {initial_large_terminals}"
         )
 
         logger.debug("Finding branches to remove")
@@ -1673,25 +1820,29 @@ def _remove_artefact_branches(
         # Remove any isolated nodes that result
         test_graph.remove_nodes_from(list(nx.isolates(test_graph)))
 
-        # Count large terminals after test removal
+        # Count large CENTRAL terminals after test removal
         final_large_terminals = _count_large_terminal_vessels(
-            test_graph, min_diameter=10.0
+            test_graph, min_diameter=10.0, central_only=True, centrality_threshold=0.3
         )
         logger.info(
-            f"Large terminal vessels after test removal: {final_large_terminals}"
+            f"Large CENTRAL terminal vessels after test removal: {final_large_terminals}"
         )
 
-        # Only apply protection logic if we would end up with 0 large terminals
+        # Only apply protection logic if we would end up with 0 large CENTRAL terminals
         if final_large_terminals < 1:
             logger.warning(
-                f"Safety check triggered: Only {final_large_terminals} large terminals would remain. "
-                "Applying protection logic to preserve largest terminal vessel."
+                f"Safety check triggered: Only {final_large_terminals} large CENTRAL terminals would remain. "
+                "Applying protection logic to preserve largest central terminal vessel."
             )
 
             # Get large terminals and filter removal list
             large_terminals = _get_large_terminal_vessels(graph, min_diameter=10.0)
             filtered_to_remove, protected_count = _filter_removal_to_protect_largest(
-                to_remove, large_terminals
+                to_remove,
+                large_terminals,
+                graph,
+                prefer_central=True,
+                centrality_threshold=0.3,
             )
 
             if protected_count > 0:
@@ -1701,7 +1852,7 @@ def _remove_artefact_branches(
                 to_remove = filtered_to_remove
         else:
             logger.info(
-                f"Safety check passed: {final_large_terminals} large terminals will remain. Proceeding with normal cleaning."
+                f"Safety check passed: {final_large_terminals} large CENTRAL terminals will remain. Proceeding with normal cleaning."
             )
 
         # Apply the removals to the actual graph
@@ -2045,63 +2196,66 @@ def clean_graph(
         )
         previous_stats = current_stats
 
-        # Step 3: Remove short terminal nodes
-        logger.info("Step 3: Removing single neighbor nodes")
-        nodes_before = graph.number_of_nodes()
-        graph = remove_single_neighbor_nodes(graph)
-        nodes_after = graph.number_of_nodes()
-        logger.info("Step 3 removed %d nodes", nodes_before - nodes_after)
-        current_stats = _get_detailed_stats(graph)
-        _append_stats_to_csv(
-            patient_stats_path,
-            patient_id,
-            "3_remove_terminals",
-            current_stats,
-            previous_stats,
-        )
-        _append_stats_to_csv(
-            global_stats_path,
-            patient_id,
-            "3_remove_terminals",
-            current_stats,
-            previous_stats,
-        )
-        previous_stats = current_stats
+        # Step 3: Remove short terminal nodes (DISABLED - redundant with Step 2 and breaks protection)
+        # This step removed terminal nodes with edge length < 1.0mm, but:
+        # - Step 2 already handles artifact removal with proper morphological criteria
+        # - This step ignores vessel diameter and can remove protected large terminals
+        # logger.info("Step 3: Removing single neighbor nodes")
+        # nodes_before = graph.number_of_nodes()
+        # graph = remove_single_neighbor_nodes(graph)
+        # nodes_after = graph.number_of_nodes()
+        # logger.info("Step 3 removed %d nodes", nodes_before - nodes_after)
+        # current_stats = _get_detailed_stats(graph)
+        # _append_stats_to_csv(
+        #     patient_stats_path,
+        #     patient_id,
+        #     "3_remove_terminals",
+        #     current_stats,
+        #     previous_stats,
+        # )
+        # _append_stats_to_csv(
+        #     global_stats_path,
+        #     patient_id,
+        #     "3_remove_terminals",
+        #     current_stats,
+        #     previous_stats,
+        # )
+        # previous_stats = current_stats
 
-        # Step 4: Remove isolated nodes
-        logger.info("Step 4: Removing isolated nodes")
+        # Step 3: Remove isolated nodes (previously Step 4)
+        logger.info("Step 3: Removing isolated nodes")
         remove_isolated_nodes(graph)
         current_stats = _get_detailed_stats(graph)
         _append_stats_to_csv(
             patient_stats_path,
             patient_id,
-            "4_remove_isolated",
+            "3_remove_isolated",
             current_stats,
             previous_stats,
         )
         _append_stats_to_csv(
             global_stats_path,
             patient_id,
-            "4_remove_isolated",
+            "3_remove_isolated",
             current_stats,
             previous_stats,
         )
         previous_stats = current_stats
 
-        # Step 5: Iteratively fuse linear segments until none remain
+        # Step 4: Iteratively fuse linear segments until none remain (previously Step 5)
         fusion_pass = 1
         max_fusion_passes = 10  # Safety limit to prevent infinite loops
 
         while current_stats["linear"] > 0 and fusion_pass <= max_fusion_passes:
             logger.info(
-                "Step 5.%d: Fusing linear segments (pass %d, %d linear nodes remaining)",
+                "Step 4.%d: Fusing linear segments (pass %d, %d linear nodes remaining)",
                 fusion_pass,
                 fusion_pass,
                 current_stats["linear"],
             )
 
             # Store state before fusion
-            nodes_before = current_stats["nodes"]
+            # nodes_before = current_stats["nodes"]
             linear_before = current_stats["linear"]
 
             # Perform fusion
@@ -2109,7 +2263,7 @@ def clean_graph(
             current_stats = _get_detailed_stats(graph)
 
             # Log this fusion pass
-            step_name = f"5_fuse_linear_pass_{fusion_pass}"
+            step_name = f"4_fuse_linear_pass_{fusion_pass}"
             _append_stats_to_csv(
                 patient_stats_path, patient_id, step_name, current_stats, previous_stats
             )
@@ -2160,13 +2314,13 @@ def clean_graph(
         logger.info("Patient statistics saved to: %s", patient_stats_path)
         logger.info("Global statistics updated: %s", global_stats_path)
 
-        # Step 6 final stage add final statistics into the csv
+        # Step 5: Final statistics (previously Step 6)
         current_stats = _get_detailed_stats(graph)
         _append_stats_to_csv(
-            patient_stats_path, patient_id, "6_final", current_stats, previous_stats
+            patient_stats_path, patient_id, "5_final", current_stats, previous_stats
         )
         _append_stats_to_csv(
-            global_stats_path, patient_id, "6_final", current_stats, previous_stats
+            global_stats_path, patient_id, "5_final", current_stats, previous_stats
         )
 
     except Exception as e:
