@@ -49,14 +49,15 @@ PulmonaryTreeGraph/
 │       └── graph_enrichment_with_embolism.py  # Vascular-embolic integration
 │
 ├── scripts/                          # CLI utilities for standalone use
-│   ├── analyze_embolie.py               # Emboli analysis script
-│   ├── batch_process_patient.py         # Complete pipeline execution for multiple patients
-│   ├── build_graph.py                   # Graph construction script
-│   ├── clean_graph.py                   # Graph cleaning script
-│   ├── orient_graph.py                  # Graph orientation script
-│   ├── label_graph.py                   # Anatomical labeling script
-│   ├── preprocess_arteries_mask.py      # Preprocessing script
-│   └── process_patient.py               # Complete pipeline execution for one patient
+│   ├── 1_preprocess.py                   # Preprocessing script
+│   ├── 2_build_graph.py                   # Graph construction script
+│   ├── 3_clean_graph.py                   # Graph cleaning script
+│   ├── 4_orient_graph.py                  # Graph orientation script
+│   ├── 5_label_graph.py                   # Anatomical labeling script
+│   ├── 6_analyze_embolism.py            # Emboli analysis script
+│   ├── batch_process_patients.py        # Complete pipeline execution for multiple patients
+│   ├── collect_enriched_graphs.py         # Copy enriched graphs to a central directory
+│   └── scores.py                         # Compute obstruction and literature scores
 │
 └── tests/
 ```
@@ -87,11 +88,11 @@ python scripts/process_patient.py \
 
 ### Batch Processing
 
-Use `batch_process_patient.py` for processing multiple patients:
+Use `batch_process_patients.py` for processing multiple patients:
 
 ```bash
 # Process all patients in a directory structure
-python scripts/batch_process_patient.py \
+python scripts/batch_process_patients.py \
     --data-dir /path/to/patient/data/ \
     --output-dir /path/to/results/ \
     --pattern "patient_*_arteries.nii.gz"
@@ -99,7 +100,7 @@ python scripts/batch_process_patient.py \
 
 ## Step-by-Step Pipeline
 
-### Step 1: Preprocessing (`preprocess_arteries_mask.py`)
+### Step 1: Preprocessing (`1_preprocess.py`)
 
 **Purpose**: Extract skeleton and distance map from binary artery mask.
 
@@ -107,11 +108,11 @@ python scripts/batch_process_patient.py \
 
 ```bash
 # Basic preprocessing
-python scripts/preprocess_arteries_mask.py \
+python scripts/1_preprocess.py \
     --artery data/patient_001_arteries.nii.gz
 
 # With custom output directory
-python scripts/preprocess_arteries_mask.py \
+python scripts/1_preprocess.py \
     --artery data/patient_001_arteries.nii.gz \
     --output-dir custom_results/patient_001/
 ```
@@ -123,7 +124,7 @@ results/patient_001/
 └── distance_map.nii.gz     # Distance transform for radius estimation
 ```
 
-### Step 2: Graph Construction (`build_graph.py`)
+### Step 2: Graph Construction (`2_build_graph.py`)
 
 **Purpose**: Convert skeleton and distance map into mathematical graph representation.
 
@@ -131,19 +132,19 @@ results/patient_001/
 
 ```bash
 # Build graph with both coordinate formats
-python scripts/build_graph.py \
+python scripts/2_build_graph.py \
     --skeleton results/patient_001/skeleton.nii.gz \
     --distance-map results/patient_001/distance_map.nii.gz
 
 # With skeleton visualization and validation
-python scripts/build_graph.py \
+python scripts/2_build_graph.py \
     --skeleton results/patient_001/skeleton.nii.gz \
     --distance-map results/patient_001/distance_map.nii.gz \
     --save-skeleton \
     --detailed-validation
 
 # Specify coordinate format
-python scripts/build_graph.py \
+python scripts/2_build_graph.py \
     --skeleton results/patient_001/skeleton.nii.gz \
     --distance-map results/patient_001/distance_map.nii.gz \
     --coordinate-format real
@@ -163,7 +164,7 @@ results/patient_001/
 └── branch_graph_skeleton_edge_id.nii.gz  # Colored skeleton by segment
 ```
 
-### Step 3: Graph Cleaning (`clean_graph.py`)
+### Step 3: Graph Cleaning (`3_clean_graph.py`)
 
 **Purpose**: Remove artifacts and optimize graph topology for physiological accuracy.
 
@@ -171,18 +172,18 @@ results/patient_001/
 
 ```bash
 # Basic cleaning with default threshold
-python scripts/clean_graph.py \
+python scripts/3_clean_graph.py \
     --graph results/patient_001/branch_graph.json
 
 # Custom radius ratio threshold and visualization
-python scripts/clean_graph.py \
+python scripts/3_clean_graph.py \
     --graph results/patient_001/branch_graph.json \
     --radius-ratio-threshold 0.3 \
     --save-skeleton \
     --save-colored-volumes edge_id
 
 # Multiple visualization types
-python scripts/clean_graph.py \
+python scripts/3_clean_graph.py \
     --graph results/patient_001/branch_graph.json \
     --save-colored-volumes edge_id level lobe
 ```
@@ -201,7 +202,7 @@ results/patient_001/
 └── cleaned_graph_vessel_volume_edge_id.nii.gz  # Colored vessel volume
 ```
 
-### Step 4: Graph Orientation (`orient_graph.py`)
+### Step 4: Graph Orientation (`4_orient_graph.py`)
 
 **Purpose**: Establish physiological flow direction from pulmonary trunk to periphery.
 
@@ -209,11 +210,11 @@ results/patient_001/
 
 ```bash
 # Basic orientation
-python scripts/orient_graph.py \
+python scripts/4_orient_graph.py \
     --graph results/patient_001/cleaned_graph.json
 
 # With visualization outputs
-python scripts/orient_graph.py \
+python scripts/4_orient_graph.py \
     --graph results/patient_001/cleaned_graph.json \
     --save-skeleton \
     --save-colored-volumes edge_id level
@@ -228,7 +229,7 @@ results/patient_001/
 └── oriented_graph_vessel_volume_level.nii.gz  # Volume colored by hierarchy
 ```
 
-### Step 5: Anatomical Labeling (`label_graph.py`)
+### Step 5: Anatomical Labeling (`5_label_graph.py`)
 
 **Purpose**: Assign anatomical information including laterality, lobe assignment, and vessel classification.
 
@@ -236,12 +237,12 @@ results/patient_001/
 
 ```bash
 # Basic labeling with lung masks
-python scripts/label_graph.py \
+python scripts/5_label_graph.py \
     --graph results/patient_001/oriented_graph.json \
     --lung-masks-dir data/patient_001_lungs/
 
 # With custom thresholds and visualization
-python scripts/label_graph.py \
+python scripts/5_label_graph.py \
     --graph results/patient_001/oriented_graph.json \
     --lung-masks-dir data/patient_001_lungs/ \
     --diameter-threshold 0.6 \
@@ -276,7 +277,7 @@ results/patient_001/
 └── labeled_graph_skeleton_level.nii.gz          # Skeleton colored by level
 ```
 
-### Step 6: Embolic Analysis (`analyze_embolie.py`)
+### Step 6: Embolic Analysis (`6_analyze_embolism.py`)
 
 **Purpose**: Characterize individual emboli and calculate obstruction metrics when integrated with vascular data.
 
@@ -284,19 +285,19 @@ results/patient_001/
 
 ```bash
 # Basic embolic analysis (standalone)
-python scripts/analyze_embolie.py \
+python scripts/6_analyze_embolism.py \
     --embolism-mask data/patient_001_embolism.nii.gz \
     --patient-name patient_001
 
 # Complete analysis with vascular integration
-python scripts/analyze_embolie.py \
+python scripts/6_analyze_embolism.py \
     --embolism-mask data/patient_001_embolism.nii.gz \
     --patient-name patient_001 \
     --vessel-graph results/patient_001/labeled_graph.json \
     --vessel-mask data/patient_001_arteries.nii.gz
 
 # With custom separation parameters
-python scripts/analyze_embolie.py \
+python scripts/6_analyze_embolism.py \
     --embolism-mask data/patient_001_embolism.nii.gz \
     --patient-name patient_001 \
     --vessel-graph results/patient_001/labeled_graph.json \
