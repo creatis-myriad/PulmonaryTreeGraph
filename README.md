@@ -68,24 +68,6 @@ The pipeline can be executed either step-by-step using individual scripts or end
 
 ## Complete Pipeline
 
-### Single Patient Processing
-
-Use `process_patient.py` for complete analysis of one patient:
-
-```bash
-# Complete pipeline with artery mask only
-python scripts/process_patient.py \
-    --artery-mask data/patient_001_arteries.nii.gz \
-    --lung-masks-dir data/patient_001_lungs/
-
-# Complete pipeline including embolic analysis
-python scripts/process_patient.py \
-    --artery-mask data/patient_001_arteries.nii.gz \
-    --lung-masks-dir data/patient_001_lungs/ \
-    --embolism-mask data/patient_001_embolism.nii.gz \
-    --output-dir results/patient_001/
-```
-
 ### Batch Processing
 
 Use `batch_process_patients.py` for processing multiple patients:
