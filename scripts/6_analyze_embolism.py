@@ -39,18 +39,24 @@ def main():
     # Output options
     parser.add_argument(
         "--output-dir",
-        help="Output directory (default: results/patient_name/embolisms/)",
+        help="Output directory (default: results/patient_name/)",
     )
 
     # Analysis options
     parser.add_argument(
         "--separation-method",
-        choices=["connected_components", "watershed"],
+        "--embolism-separation-method",
+        choices=[
+            "connected_components",
+            "watershed",
+            "connected_components_with_threshold",
+        ],
         default="connected_components",
         help="Method for separating embolisms (default: connected_components)",
     )
     parser.add_argument(
         "--fusion-threshold",
+        "--embolism-fusion-threshold",
         type=float,
         default=10.0,
         help="Distance threshold for fusing nearby components in mm (default: 10.0)",
@@ -65,6 +71,24 @@ def main():
         action="store_true",
         default=True,
         help="Create colored visualization masks (default: True)",
+    )
+
+    # Literature scores options
+    parser.add_argument(
+        "--compute-qanadli",
+        action="store_true",
+        help="Compute Qanadli obstruction score",
+    )
+    parser.add_argument(
+        "--compute-mastora",
+        action="store_true",
+        help="Compute Mastora obstruction scores (central, peripheral, global)",
+    )
+    parser.add_argument(
+        "--obstruction-attr",
+        choices=["volumetric_obstruction", "transversal_obstruction_max"],
+        default="volumetric_obstruction",
+        help="Obstruction attribute to use for literature scores (default: volumetric_obstruction)",
     )
 
     # Vessel interaction analysis
@@ -119,7 +143,7 @@ def main():
     if args.output_dir:
         output_dir = args.output_dir
     else:
-        output_dir = f"results/{patient_name}/embolisms"
+        output_dir = f"results/{patient_name}"
 
     logger.info("Starting embolism analysis")
     logger.info("Patient: %s", patient_name)
@@ -156,6 +180,9 @@ def main():
                 compute_transversal_obstruction=args.compute_transversal_obstruction,
                 transversal_obstruction_kwargs=transversal_obstruction_kwargs,
                 coordinate_format=args.coordinate_format,
+                compute_qanadli=args.compute_qanadli,
+                compute_mastora=args.compute_mastora,
+                obstruction_attr=args.obstruction_attr,
             )
         else:
             logger.info("Running basic pipeline analysis")

@@ -24,7 +24,7 @@ def main():
     parser.add_argument(
         "--graph",
         required=True,
-        help="Input graph file path (e.g. results/0001/oriented_graph.json)",
+        help="Input graph file path (e.g. results/0001/4_orient_graph/graph/oriented_graph.json)",
     )
     parser.add_argument(
         "--lung-masks-dir", required=True, help="Directory containing lung mask files"
@@ -49,6 +49,7 @@ def main():
         help="Coordinate format for saved graph: voxel, real-world, or both (default)",
     )
     parser.add_argument(
+        "--save-skeletons",
         "--save-skeleton",
         action="store_true",
         help="Save both binary and edge_id colored skeleton from graph",
@@ -58,6 +59,28 @@ def main():
         nargs="+",
         choices=["edge_id", "level", "lobe"],
         help="Save vessel volumes with specified coloring",
+    )
+    parser.add_argument(
+        "--save-all-step-volumes",
+        action="store_true",
+        help="Save vessel volumes at each processing step",
+    )
+    parser.add_argument(
+        "--save-cycle-skeletons",
+        action="store_true",
+        help="Save skeletons of detected cycles before and after cleaning",
+    )
+    parser.add_argument(
+        "--diameter-threshold",
+        type=float,
+        default=0.7,
+        help="Minimum diameter ratio for trunk vessels (default: 0.7)",
+    )
+    parser.add_argument(
+        "--length-threshold",
+        type=float,
+        default=1.5,
+        help="Maximum length/diameter ratio for trunk vessels (default: 1.5)",
     )
 
     parser.add_argument(
@@ -83,18 +106,16 @@ def main():
     try:
         # Extract patient name for default output directory
         if not args.output_dir:
-            # Try to extract patient name from graph path
-            graph_basename = os.path.basename(args.graph)
-            if (
-                "oriented_graph" in graph_basename
-                or "cleaned_graph" in graph_basename
-                or "branch_graph" in graph_basename
-            ):
-                # Path like: results/0001/oriented_graph.json
-                patient_name = os.path.basename(os.path.dirname(args.graph))
+            path = os.path.normpath(args.graph)
+            parts = path.split(os.sep)
+            if "results" in parts:
+                results_index = parts.index("results")
+                if results_index + 1 < len(parts):
+                    patient_name = parts[results_index + 1]
+                else:
+                    patient_name = os.path.basename(os.path.dirname(path))
             else:
-                # Path like: 0001_oriented_graph.json
-                patient_name = graph_basename.split("_")[0]
+                patient_name = os.path.basename(os.path.dirname(path))
 
             output_dir = os.path.join("results", patient_name)
         else:
@@ -105,12 +126,12 @@ def main():
         logger.info("Lung masks directory: %s", args.lung_masks_dir)
         logger.info("Output directory: %s", output_dir)
         logger.info("Coordinate format: %s", args.coordinate_format)
-        logger.info("Save skeleton: %s", args.save_skeleton)
-
-        if args.save_colored_volumes:
-            logger.info("Save colored volumes: %s", args.save_colored_volumes)
-        if args.vessel_expansion_method:
-            logger.info("Vessel expansion method: %s", args.vessel_expansion_method)
+        logger.info("Save skeletons: %s", args.save_skeletons)
+        logger.info("Save colored volumes: %s", args.save_colored_volumes)
+        logger.info("Save all step volumes: %s", args.save_all_step_volumes)
+        logger.info("Save cycle skeletons: %s", args.save_cycle_skeletons)
+        logger.info("Diameter threshold: %.3f", args.diameter_threshold)
+        logger.info("Length threshold: %.3f", args.length_threshold)
 
         # Call the pipeline function
         label_vessel_graph(
@@ -120,8 +141,10 @@ def main():
             original_skeleton_path=args.original_skeleton,
             arteries_mask_path=args.arteries_mask,
             coordinate_format=args.coordinate_format,
-            save_skeleton=args.save_skeleton,
+            save_skeleton=args.save_skeletons,
             save_colored_volumes=args.save_colored_volumes,
+            diameter_threshold=args.diameter_threshold,
+            length_threshold=args.length_threshold,
         )
 
         logger.info("Graph labeling completed successfully!")

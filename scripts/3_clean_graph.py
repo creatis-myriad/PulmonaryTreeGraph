@@ -52,7 +52,7 @@ def main():
         help="Coordinate format for saved graph: voxel, real-world, or both (default)",
     )
     parser.add_argument(
-        "--save-skeleton",
+        "--save-skeletons",
         action="store_true",
         help="Save both binary and edge_id colored skeleton from graph",
     )
@@ -61,6 +61,16 @@ def main():
         nargs="+",
         choices=["edge_id", "level", "lobe"],
         help="Save vessel volumes with specified coloring",
+    )
+    parser.add_argument(
+        "--save-all-step-volumes",
+        action="store_true",
+        help="Save vessel volumes at each processing step",
+    )
+    parser.add_argument(
+        "--save-cycle-skeletons",
+        action="store_true",
+        help="Save skeletons of detected cycles before and after cleaning",
     )
 
     args = parser.parse_args()
@@ -93,10 +103,16 @@ def main():
         # Optional parameters only if specified
         if args.coordinate_format != "both":
             logger.info("Coordinate format: %s", args.coordinate_format)
-        if args.save_skeleton:
-            logger.info("Save skeleton: %s", args.save_skeleton)
+        if args.save_skeletons:
+            logger.info("Save skeletons: %s", args.save_skeletons)
         if args.save_colored_volumes:
             logger.info("Save colored volumes: %s", args.save_colored_volumes)
+        if args.save_all_step_volumes:
+            logger.info(
+                "Save colored volumes for all steps: %s", args.save_all_step_volumes
+            )
+        if args.save_cycle_skeletons:
+            logger.info("Save cycle skeletons: %s", args.save_cycle_skeletons)
 
         # Call the pipeline function - let it handle detailed logging
         clean_vessel_graph(
@@ -106,8 +122,9 @@ def main():
             arteries_mask_path=args.arteries_mask,
             radius_ratio_threshold=args.radius_ratio_threshold,
             coordinate_format=args.coordinate_format,
-            save_skeleton=args.save_skeleton,
+            save_skeleton=args.save_skeletons,
             save_colored_volumes=args.save_colored_volumes,
+            save_cycle_skeletons=args.save_cycle_skeletons,
         )
 
         # Only log completion - remove all the detailed file listings

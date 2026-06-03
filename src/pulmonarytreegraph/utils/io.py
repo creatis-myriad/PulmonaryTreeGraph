@@ -802,6 +802,9 @@ def create_colored_embolism_masks(
 
             logger.debug("Colored embolism %d with value %d", embolism_id, color_value)
 
+        # Ensure output directory exists
+        os.makedirs(output_dir, exist_ok=True)
+
         # Save colored mask
         patient_name = (
             embolism_objects[0]["patient_name"] if embolism_objects else "unknown"

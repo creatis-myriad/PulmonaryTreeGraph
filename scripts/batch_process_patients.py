@@ -18,15 +18,18 @@ from pulmonarytreegraph.pipeline.core import process_patient_complete_pipeline
 from pulmonarytreegraph.scores.compute_scores import compute_literature_scores
 
 
-def setup_logging(output_dir: str = None, log_level: str = "INFO"):
+def setup_logging(output_dir: str = None, log_level: str = "INFO") -> str:
     """Setup logging for batch processing."""
     log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+    # Generate a consistent batch run identifier
+    log_id = str(int(time.time()))
 
     # Create logs directory if output_dir is provided
     if output_dir:
         log_dir = os.path.join(output_dir, "logs")
         os.makedirs(log_dir, exist_ok=True)
-        log_file = os.path.join(log_dir, f"batch_processing_{int(time.time())}.log")
+        log_file = os.path.join(log_dir, f"batch_processing_{log_id}.log")
 
         logging.basicConfig(
             level=getattr(logging, log_level.upper()),
@@ -41,6 +44,8 @@ def setup_logging(output_dir: str = None, log_level: str = "INFO"):
             handlers=[logging.StreamHandler(sys.stdout)],
         )
 
+    return log_id
+
 
 def find_patients(
     data_dir: str = None,
@@ -48,6 +53,7 @@ def find_patients(
     embolies_dir: str = None,
     images_dir: str = None,
     lungs_dir: str = None,
+    log_id: str = None,
 ) -> list[dict[str, str]]:
     """
     Find all patient files in the specific directory structure.
@@ -114,6 +120,7 @@ def find_patients(
             "lung_masks_dir": None,
             "embolism_mask": None,
             "image": None,
+            "log_id": log_id,
         }
 
         # Look for lung masks directory
@@ -301,6 +308,7 @@ def process_single_patient(
         results = process_patient_complete_pipeline(
             artery_mask_path=patient_info["artery_mask"],
             lung_masks_dir=patient_info["lung_masks_dir"],
+            log_id=patient_info["log_id"],
             embolism_mask_path=patient_info.get("embolism_mask"),
             output_dir=patient_output_dir,
             radius_ratio_threshold=processing_options.get(
@@ -441,10 +449,19 @@ def copy_enriched_graphs(
 
 
 def generate_batch_report(
-    results: list[dict[str, Any]], output_dir: str, logger: logging.Logger
+    results: list[dict[str, Any]],
+    report_dir: str,
+    logger: logging.Logger,
+    log_id: str | None = None,
 ):
     """Generate a comprehensive batch processing report."""
-    report_path = os.path.join(output_dir, "batch_processing_report.txt")
+    os.makedirs(report_dir, exist_ok=True)
+    report_filename = (
+        f"batch_processing_report_{log_id}.txt"
+        if log_id
+        else "batch_processing_report.txt"
+    )
+    report_path = os.path.join(report_dir, report_filename)
 
     successful = [r for r in results if r["status"] == "completed"]
     failed = [r for r in results if r["status"] == "failed"]
@@ -584,6 +601,7 @@ def run_scores_only_mode(args, logger):
                 compute_qanadli=args.compute_qanadli,
                 compute_mastora=args.compute_mastora,
                 obstruction_attr=args.obstruction_attr,
+                global_stats_dir=getattr(args, "global_stats_dir", None),
                 logger=logger,
             )
             results.append(result)
@@ -717,6 +735,7 @@ def compute_scores_for_single_graph(
     compute_qanadli: bool,
     compute_mastora: bool,
     obstruction_attr: str,
+    global_stats_dir: str | None,
     logger: logging.Logger,
 ) -> dict:
     """Compute scores for a single enriched graph."""
@@ -768,6 +787,7 @@ def compute_scores_for_single_graph(
             compute_qanadli=compute_qanadli,
             compute_mastora=compute_mastora,
             obstruction_attr=obstruction_attr,
+            global_stats_dir=global_stats_dir,
         )
 
         processing_time = time.time() - start_time
@@ -881,8 +901,8 @@ Expected directory structure:
     parser.add_argument(
         "--diameter-threshold",
         type=float,
-        default=0.5,
-        help="Minimum diameter ratio for trunk vessels (default: 0.5)",
+        default=0.7,
+        help="Minimum diameter ratio for trunk vessels (default: 0.7)",
     )
     parser.add_argument(
         "--length-threshold",
@@ -1023,15 +1043,23 @@ Expected directory structure:
     args = parser.parse_args()
 
     # Create output directory
+    if not args.output_dir:
+        args.output_dir = "batch_results"
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # Setup logging
-    setup_logging(args.output_dir, args.log_level)
+    # Setup logging and batch identifiers
+    log_id = setup_logging(args.output_dir, args.log_level)
+    args.log_id = log_id
+    args.reports_dir = os.path.join(args.output_dir, "reports", log_id)
+    args.global_stats_dir = os.path.join(args.output_dir, "global_stats", log_id)
+
     logger = logging.getLogger(__name__)
 
     logger.info("Starting batch processing")
     logger.info("Data directory: %s", args.data_dir)
     logger.info("Output directory: %s", args.output_dir)
+    logger.info("Batch report directory: %s", args.reports_dir)
+    logger.info("Batch global stats directory: %s", args.global_stats_dir)
 
     # If scores-only mode is requested, run the scoring logic and exit
     if args.scores_only:
@@ -1047,6 +1075,7 @@ Expected directory structure:
             embolies_dir=args.embolies_dir,
             images_dir=args.images_dir,
             lungs_dir=args.lungs_dir,
+            log_id=args.log_id,
         )
         logger.info("Found %d patients", len(all_patients))
     except FileNotFoundError as e:
@@ -1138,7 +1167,7 @@ Expected directory structure:
             for error in validation.get("errors", []):
                 logger.error("  Error: %s", error)
 
-        generate_batch_report(validation_results, args.output_dir, logger)
+        generate_batch_report(validation_results, args.reports_dir, logger, args.log_id)
 
         valid_patients = [r for r in validation_results if r["validation"]["valid"]]
         logger.info(
@@ -1282,11 +1311,13 @@ Expected directory structure:
             total_volume,
         )
 
-    generate_batch_report(results, args.output_dir, logger)
+    generate_batch_report(results, args.reports_dir, logger, args.log_id)
 
     # ADD THE QUICK ANALYSIS HERE - AFTER BATCH REPORT GENERATION
     # Quick segment analysis from global_labelling_stats.csv
-    global_stats_path = os.path.join(args.output_dir, "global_labelling_stats.csv")
+    global_stats_path = os.path.join(
+        args.global_stats_dir, "global_labelling_stats.csv"
+    )
     if os.path.exists(global_stats_path) and successful:
         logger.info("\n" + "=" * 80)
         logger.info("SEGMENT ANALYSIS SUMMARY")

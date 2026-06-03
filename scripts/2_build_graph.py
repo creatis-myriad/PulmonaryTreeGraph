@@ -41,14 +41,25 @@ def main():
         help="Coordinate format for saved graph: voxel, real-world, or both (default)",
     )
     parser.add_argument(
-        "--save-skeleton",
+        "--save-skeletons",
         action="store_true",
         help="Save both binary and edge_id colored skeleton from graph",
     )
     parser.add_argument(
-        "--detailed-validation",
+        "--save-colored-volumes",
+        nargs="+",
+        choices=["edge_id", "level", "lobe"],
+        help="Save vessel volumes with specified coloring",
+    )
+    parser.add_argument(
+        "--save-all-step-volumes",
         action="store_true",
-        help="Show detailed validation statistics",
+        help="Save vessel volumes at each processing step",
+    )
+    parser.add_argument(
+        "--save-cycle-skeletons",
+        action="store_true",
+        help="Save skeletons of detected cycles before and after cleaning",
     )
 
     args = parser.parse_args()
@@ -79,7 +90,10 @@ def main():
         logger.info("Distance map: %s", args.distance_map)
         logger.info("Output directory: %s", output_dir)
         logger.info("Coordinate format: %s", args.coordinate_format)
-        logger.info("Save skeleton: %s", args.save_skeleton)
+        logger.info("Save skeletons: %s", args.save_skeletons)
+        logger.info("Save colored volumes: %s", args.save_colored_volumes)
+        logger.info("Save all step volumes: %s", args.save_all_step_volumes)
+        logger.info("Save cycle skeletons: %s", args.save_cycle_skeletons)
 
         # Call the pipeline function
         result = build_graph_from_skeleton(
@@ -87,8 +101,10 @@ def main():
             distance_map_path=args.distance_map,
             output_dir=output_dir,
             coordinate_format=args.coordinate_format,
-            save_skeleton=args.save_skeleton,
-            detailed_validation=args.detailed_validation,
+            save_skeleton=args.save_skeletons,
+            save_colored_volumes=args.save_colored_volumes,
+            save_all_step_volumes=args.save_all_step_volumes,
+            save_cycle_skeletons=args.save_cycle_skeletons,
         )
 
         logger.info("Graph building completed successfully!")

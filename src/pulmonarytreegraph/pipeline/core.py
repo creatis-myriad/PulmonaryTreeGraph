@@ -92,9 +92,9 @@ def build_graph_from_skeleton(
     skeleton_path: str,
     distance_map_path: str,
     output_dir: str | None = None,
+    log_id: str | None = None,
     coordinate_format: str = "both",
     save_skeleton: bool = False,
-    detailed_validation: bool = False,
 ) -> dict[str, Any]:
     """
     Build a graph from skeleton and distance map.
@@ -105,7 +105,6 @@ def build_graph_from_skeleton(
     - output_dir: Output directory (defaults to results/patient_name)
     - coordinate_format: "voxel", "real", or "both"
     - save_skeleton: Whether to save both binary and edge_id colored skeleton from graph
-    - detailed_validation: Whether to show detailed validation
 
     Returns:
     - Dictionary with graph paths and results
@@ -116,15 +115,31 @@ def build_graph_from_skeleton(
 
     os.makedirs(output_dir, exist_ok=True)
 
+    # Create dedicated subdirectory for build outputs
+    build_dir = os.path.join(output_dir, "2_build_graph")
+    graph_dir = os.path.join(build_dir, "graph")
+    skeleton_dir = os.path.join(build_dir, "skeleton")
+    os.makedirs(graph_dir, exist_ok=True)
+    os.makedirs(skeleton_dir, exist_ok=True)
+
     # Extract patient_id from output directory
     patient_id = os.path.basename(output_dir)
 
-    # Define statistics paths automatically
-    patient_stats_path = Path(output_dir) / "graph_construction_stats.csv"
+    # Create stats subdirectory
+    stats_dir = os.path.join(build_dir, "stats")
+    os.makedirs(stats_dir, exist_ok=True)
 
-    # Global stats at the root of results directory
+    # Define statistics paths automatically
+    patient_stats_path = Path(stats_dir) / "graph_construction_stats.csv"
+
+    # Global stats in global_stats folder at the root of results directory
     results_base_dir = os.path.dirname(output_dir)
-    global_stats_path = Path(results_base_dir) / "global_construction_stats.csv"
+    if log_id:
+        global_stats_dir = Path(results_base_dir) / "global_stats" / log_id
+    else:
+        global_stats_dir = Path(results_base_dir) / "global_stats"
+    global_stats_dir.mkdir(parents=True, exist_ok=True)
+    global_stats_path = global_stats_dir / "global_construction_stats.csv"
 
     logger.info("Loading skeleton: %s", skeleton_path)
     skeleton, header, spacing, affine = load_niftii(skeleton_path, "skeleton_original")
@@ -155,7 +170,7 @@ def build_graph_from_skeleton(
     graph_paths = {}
 
     if coordinate_format == "both":
-        base_path = os.path.join(output_dir, "branch_graph")
+        base_path = os.path.join(graph_dir, "branch_graph")
         voxel_path, real_path = save_graph_dual_format(
             branch_graph, base_path, skeleton_path
         )
@@ -165,13 +180,13 @@ def build_graph_from_skeleton(
         logger.info("Branch graph (real coords) saved: %s", real_path)
 
     elif coordinate_format == "real":
-        branch_graph_path = os.path.join(output_dir, "branch_graph_real_coords.json")
+        branch_graph_path = os.path.join(graph_dir, "branch_graph_real_coords.json")
         save_graph_with_real_coordinates(branch_graph, branch_graph_path, skeleton_path)
         graph_paths["real"] = branch_graph_path
         logger.info("Branch graph (real coords) saved: %s", branch_graph_path)
 
     else:  # voxel
-        branch_graph_path = os.path.join(output_dir, "branch_graph.json")
+        branch_graph_path = os.path.join(graph_dir, "branch_graph.json")
         save_graph(branch_graph, branch_graph_path)
         graph_paths["voxel"] = branch_graph_path
         logger.info("Branch graph (voxel coords) saved: %s", branch_graph_path)
@@ -180,7 +195,9 @@ def build_graph_from_skeleton(
     skeleton_paths = {}
     if save_skeleton:
         # Save binary skeleton
-        binary_skeleton_path = os.path.join(output_dir, "branch_graph_skeleton.nii.gz")
+        binary_skeleton_path = os.path.join(
+            skeleton_dir, "branch_graph_skeleton.nii.gz"
+        )
         recreated_skeleton = recreate_skeleton_from_graph(branch_graph, skeleton.shape)
         header_copy = header.copy()
         header_copy.set_data_dtype(skeleton.dtype)
@@ -196,7 +213,7 @@ def build_graph_from_skeleton(
 
         # Save edge_id colored skeleton
         edge_id_skeleton_path = os.path.join(
-            output_dir, "branch_graph_skeleton_edge_id.nii.gz"
+            skeleton_dir, "branch_graph_skeleton_edge_id.nii.gz"
         )
         save_colored_skeleton_from_graph(
             branch_graph,
@@ -217,17 +234,6 @@ def build_graph_from_skeleton(
 
     logger.info("Validation summary: Perfect match=%s", metrics["perfect_match"])
 
-    if detailed_validation:
-        logger.info("Detailed Validation Results:")
-        logger.info("  Original voxels: %d", metrics["original_voxels"])
-        logger.info("  Recreated voxels: %d", metrics["recreated_voxels"])
-        logger.info("  Dice Coefficient: %.4f", metrics["dice_coefficient"])
-        logger.info(
-            "  Coverage of original: %.2f%%", metrics["coverage_original"] * 100
-        )
-        logger.info("  Missing voxels: %d", metrics["missing_voxels"])
-        logger.info("  Extra voxels: %d", metrics["extra_voxels"])
-
     if metrics["missing_voxels"] > 0:
         logger.warning(
             "%d voxels from original skeleton missing in graph representation",
@@ -245,6 +251,7 @@ def build_graph_from_skeleton(
 def clean_vessel_graph(
     graph_path: str,
     output_dir: str | None = None,
+    log_id: str | None = None,
     original_skeleton_path: str | None = None,
     arteries_mask_path: str | None = None,
     radius_ratio_threshold: float = 0.3,
@@ -278,13 +285,28 @@ def clean_vessel_graph(
 
     os.makedirs(output_dir, exist_ok=True)
 
+    # Create dedicated subdirectory for clean outputs
+    clean_dir = os.path.join(output_dir, "3_clean_graph")
+    graph_dir = os.path.join(clean_dir, "graph")
+    skeleton_dir = os.path.join(clean_dir, "skeleton")
+    volumes_dir = os.path.join(clean_dir, "volumes")
+    stats_dir = os.path.join(clean_dir, "stats")
+    os.makedirs(graph_dir, exist_ok=True)
+    os.makedirs(skeleton_dir, exist_ok=True)
+    os.makedirs(stats_dir, exist_ok=True)
+
     # Extract patient_id
     patient_id = os.path.basename(output_dir)
 
-    # Define statistics paths
-    patient_stats_path = os.path.join(output_dir, "graph_cleaning_stats.csv")
+    # Define statistics paths (patient stats kept inside the cleaning folder)
+    patient_stats_path = os.path.join(stats_dir, "graph_cleaning_stats.csv")
     results_base_dir = os.path.dirname(output_dir)
-    global_stats_path = os.path.join(results_base_dir, "global_cleaning_stats.csv")
+    if log_id:
+        global_stats_dir = Path(results_base_dir) / "global_stats" / log_id
+    else:
+        global_stats_dir = Path(results_base_dir) / "global_stats"
+    global_stats_dir.mkdir(parents=True, exist_ok=True)
+    global_stats_path = os.path.join(global_stats_dir, "global_cleaning_stats.csv")
 
     logger.info("Loading graph: %s", graph_path)
     graph = load_graph(graph_path)
@@ -296,7 +318,7 @@ def clean_vessel_graph(
     # Prepare cycle skeleton saving parameters
     cycle_skeletons_dir = None
     if save_cycle_skeletons:
-        cycle_skeletons_dir = os.path.join(output_dir, "cycle_skeletons")
+        cycle_skeletons_dir = os.path.join(clean_dir, "cycle_skeletons")
         logger.info("Cycle skeletons will be saved to: %s", cycle_skeletons_dir)
 
     logger.info("Cleaning graph...")
@@ -329,7 +351,7 @@ def clean_vessel_graph(
                 "original_skeleton_path required when using coordinate_format 'both'"
             )
 
-        base_path = os.path.join(output_dir, "cleaned_graph")
+        base_path = os.path.join(graph_dir, "cleaned_graph")
         voxel_path, real_path = save_graph_dual_format(
             cleaned_graph, base_path, original_skeleton_path
         )
@@ -344,7 +366,7 @@ def clean_vessel_graph(
                 "original_skeleton_path required when using coordinate_format 'real'"
             )
 
-        cleaned_graph_path = os.path.join(output_dir, "cleaned_graph_real_coords.json")
+        cleaned_graph_path = os.path.join(graph_dir, "cleaned_graph_real_coords.json")
         save_graph_with_real_coordinates(
             cleaned_graph, cleaned_graph_path, original_skeleton_path
         )
@@ -352,7 +374,7 @@ def clean_vessel_graph(
         logger.info("Cleaned graph (real coords) saved: %s", cleaned_graph_path)
 
     else:  # voxel
-        cleaned_graph_path = os.path.join(output_dir, "cleaned_graph.json")
+        cleaned_graph_path = os.path.join(graph_dir, "cleaned_graph.json")
         save_graph(cleaned_graph, cleaned_graph_path)
         graph_paths["voxel"] = cleaned_graph_path
         logger.info("Cleaned graph (voxel coords) saved: %s", cleaned_graph_path)
@@ -368,7 +390,9 @@ def clean_vessel_graph(
         )
 
         # Save binary skeleton
-        binary_skeleton_path = os.path.join(output_dir, "cleaned_graph_skeleton.nii.gz")
+        binary_skeleton_path = os.path.join(
+            skeleton_dir, "cleaned_graph_skeleton.nii.gz"
+        )
         recreated_skeleton = recreate_skeleton_from_graph(
             cleaned_graph, skeleton_data.shape
         )
@@ -386,7 +410,7 @@ def clean_vessel_graph(
 
         # Save edge_id colored skeleton
         edge_id_skeleton_path = os.path.join(
-            output_dir, "cleaned_graph_skeleton_edge_id.nii.gz"
+            skeleton_dir, "cleaned_graph_skeleton_edge_id.nii.gz"
         )
         save_colored_skeleton_from_graph(
             cleaned_graph,
@@ -412,6 +436,7 @@ def clean_vessel_graph(
                 "original_skeleton_path required when save_colored_volumes is specified"
             )
 
+        os.makedirs(volumes_dir, exist_ok=True)
         logger.info("Creating vessel volumes...")
 
         # Validate volume options - only allow edge_id, level, lobe
@@ -432,13 +457,13 @@ def clean_vessel_graph(
             elif save_skeleton:
                 # Check if skeleton would be saved with this color_by
                 potential_skeleton_path = os.path.join(
-                    output_dir, f"cleaned_graph_skeleton_{color_by}.nii.gz"
+                    skeleton_dir, f"cleaned_graph_skeleton_{color_by}.nii.gz"
                 )
                 if os.path.exists(potential_skeleton_path):
                     colored_skeleton_path = potential_skeleton_path
 
             volume_output = os.path.join(
-                output_dir,
+                volumes_dir,
                 f"cleaned_graph_vessel_volume_{color_by}.nii.gz",
             )
             save_colored_vessel_volume_from_graph(
@@ -499,6 +524,14 @@ def orient_vessel_graph(
 
     os.makedirs(output_dir, exist_ok=True)
 
+    # Create dedicated subdirectories for orientation outputs
+    orient_dir = os.path.join(output_dir, "4_orient_graph")
+    graph_dir = os.path.join(orient_dir, "graph")
+    skeleton_dir = os.path.join(orient_dir, "skeleton")
+    volumes_dir = os.path.join(orient_dir, "volumes")
+    os.makedirs(graph_dir, exist_ok=True)
+    os.makedirs(skeleton_dir, exist_ok=True)
+
     logger.info("Loading graph: %s", graph_path)
     graph = load_graph(graph_path)
 
@@ -523,7 +556,7 @@ def orient_vessel_graph(
                 "original_skeleton_path required when using coordinate_format 'both'"
             )
 
-        base_path = os.path.join(output_dir, "oriented_graph")
+        base_path = os.path.join(graph_dir, "oriented_graph")
         voxel_path, real_path = save_graph_dual_format(
             oriented_graph, base_path, original_skeleton_path
         )
@@ -538,9 +571,7 @@ def orient_vessel_graph(
                 "original_skeleton_path required when using coordinate_format 'real'"
             )
 
-        oriented_graph_path = os.path.join(
-            output_dir, "oriented_graph_real_coords.json"
-        )
+        oriented_graph_path = os.path.join(graph_dir, "oriented_graph_real_coords.json")
         save_graph_with_real_coordinates(
             oriented_graph, oriented_graph_path, original_skeleton_path
         )
@@ -548,7 +579,7 @@ def orient_vessel_graph(
         logger.info("Oriented graph (real coords) saved: %s", oriented_graph_path)
 
     else:  # voxel
-        oriented_graph_path = os.path.join(output_dir, "oriented_graph.json")
+        oriented_graph_path = os.path.join(graph_dir, "oriented_graph.json")
         save_graph(oriented_graph, oriented_graph_path)
         graph_paths["voxel"] = oriented_graph_path
         logger.info("Oriented graph (voxel coords) saved: %s", oriented_graph_path)
@@ -565,7 +596,7 @@ def orient_vessel_graph(
 
         # Save binary skeleton
         binary_skeleton_path = os.path.join(
-            output_dir, "oriented_graph_skeleton.nii.gz"
+            skeleton_dir, "oriented_graph_skeleton.nii.gz"
         )
         recreated_skeleton = recreate_skeleton_from_graph(
             oriented_graph, skeleton_data.shape
@@ -584,7 +615,7 @@ def orient_vessel_graph(
 
         # Save edge_id colored skeleton
         edge_id_skeleton_path = os.path.join(
-            output_dir, "oriented_graph_skeleton_edge_id.nii.gz"
+            skeleton_dir, "oriented_graph_skeleton_edge_id.nii.gz"
         )
         save_colored_skeleton_from_graph(
             oriented_graph,
@@ -612,6 +643,8 @@ def orient_vessel_graph(
                 "original_skeleton_path required when save_colored_volumes is specified"
             )
 
+        os.makedirs(volumes_dir, exist_ok=True)
+
         logger.info("Creating vessel volumes...")
 
         # Validate volume options - only allow edge_id, level, lobe
@@ -632,13 +665,13 @@ def orient_vessel_graph(
             elif save_skeleton:
                 # Check if skeleton would be saved with this color_by
                 potential_skeleton_path = os.path.join(
-                    output_dir, f"oriented_graph_skeleton_{color_by}.nii.gz"
+                    skeleton_dir, f"oriented_graph_skeleton_{color_by}.nii.gz"
                 )
                 if os.path.exists(potential_skeleton_path):
                     colored_skeleton_path = potential_skeleton_path
 
             volume_output = os.path.join(
-                output_dir,
+                volumes_dir,
                 f"oriented_graph_vessel_volume_{color_by}.nii.gz",
             )
             save_colored_vessel_volume_from_graph(
@@ -647,7 +680,7 @@ def orient_vessel_graph(
                 arteries_mask_path=arteries_mask_path,
                 output_path=volume_output,
                 color_by=color_by,
-                colored_skeleton_path=colored_skeleton_path,  # Pass the colored skeleton path
+                colored_skeleton_path=colored_skeleton_path,
             )
             volume_paths[color_by] = volume_output
             logger.info("Vessel volume (%s) saved: %s", color_by, volume_output)
@@ -664,6 +697,7 @@ def label_vessel_graph(
     graph_path: str,
     lung_masks_dir: str,
     output_dir: str | None = None,
+    log_id: str | None = None,
     original_skeleton_path: str | None = None,
     arteries_mask_path: str | None = None,
     coordinate_format: str = "both",
@@ -697,15 +731,32 @@ def label_vessel_graph(
 
     os.makedirs(output_dir, exist_ok=True)
 
+    # Create dedicated subdirectories for labeling outputs
+    label_dir = os.path.join(output_dir, "5_label_graph")
+    graph_dir = os.path.join(label_dir, "graph")
+    skeleton_dir = os.path.join(label_dir, "skeleton")
+    volumes_dir = os.path.join(label_dir, "volumes")
+    os.makedirs(graph_dir, exist_ok=True)
+    os.makedirs(skeleton_dir, exist_ok=True)
+
     # Extract patient_id from output directory
     patient_id = os.path.basename(output_dir)
 
-    # Define statistics paths automatically
-    patient_stats_path = Path(output_dir) / "graph_labelling_stats.csv"
+    # Create stats subdirectory
+    stats_dir = os.path.join(label_dir, "stats")
+    os.makedirs(stats_dir, exist_ok=True)
 
-    # Global stats at the root of results directory
+    # Define statistics paths automatically
+    patient_stats_path = Path(stats_dir) / "graph_labelling_stats.csv"
+
+    # Global stats in global_stats folder at the root of results directory
     results_base_dir = os.path.dirname(output_dir)
-    global_stats_path = Path(results_base_dir) / "global_labelling_stats.csv"
+    if log_id:
+        global_stats_dir = Path(results_base_dir) / "global_stats" / log_id
+    else:
+        global_stats_dir = Path(results_base_dir) / "global_stats"
+    global_stats_dir.mkdir(parents=True, exist_ok=True)
+    global_stats_path = global_stats_dir / "global_labelling_stats.csv"
 
     logger.info("Loading graph: %s", graph_path)
     graph = load_graph(graph_path)
@@ -769,7 +820,7 @@ def label_vessel_graph(
                 "original_skeleton_path required when using coordinate_format 'both'"
             )
 
-        base_path = os.path.join(output_dir, "labeled_graph")
+        base_path = os.path.join(graph_dir, "labeled_graph")
         voxel_path, real_path = save_graph_dual_format(
             labeled_graph, base_path, original_skeleton_path
         )
@@ -784,7 +835,7 @@ def label_vessel_graph(
                 "original_skeleton_path required when using coordinate_format 'real'"
             )
 
-        labeled_graph_path = os.path.join(output_dir, "labeled_graph_real_coords.json")
+        labeled_graph_path = os.path.join(graph_dir, "labeled_graph_real_coords.json")
         save_graph_with_real_coordinates(
             labeled_graph, labeled_graph_path, original_skeleton_path
         )
@@ -792,7 +843,7 @@ def label_vessel_graph(
         logger.info("Labeled graph (real coords) saved: %s", labeled_graph_path)
 
     else:  # voxel
-        labeled_graph_path = os.path.join(output_dir, "labeled_graph.json")
+        labeled_graph_path = os.path.join(graph_dir, "labeled_graph.json")
         save_graph(labeled_graph, labeled_graph_path)
         graph_paths["voxel"] = labeled_graph_path
         logger.info("Labeled graph (voxel coords) saved: %s", labeled_graph_path)
@@ -808,7 +859,9 @@ def label_vessel_graph(
         )
 
         # Save binary skeleton
-        binary_skeleton_path = os.path.join(output_dir, "labeled_graph_skeleton.nii.gz")
+        binary_skeleton_path = os.path.join(
+            skeleton_dir, "labeled_graph_skeleton.nii.gz"
+        )
         recreated_skeleton = recreate_skeleton_from_graph(
             labeled_graph, skeleton_data.shape
         )
@@ -826,7 +879,7 @@ def label_vessel_graph(
 
         # Save edge_id colored skeleton
         edge_id_skeleton_path = os.path.join(
-            output_dir, "labeled_graph_skeleton_edge_id.nii.gz"
+            skeleton_dir, "labeled_graph_skeleton_edge_id.nii.gz"
         )
         save_colored_skeleton_from_graph(
             labeled_graph,
@@ -842,7 +895,7 @@ def label_vessel_graph(
 
         # Save level colored skeleton
         level_skeleton_path = os.path.join(
-            output_dir, "labeled_graph_skeleton_level.nii.gz"
+            skeleton_dir, "labeled_graph_skeleton_level.nii.gz"
         )
         save_colored_skeleton_from_graph(
             labeled_graph,
@@ -868,6 +921,7 @@ def label_vessel_graph(
                 "original_skeleton_path required when save_colored_volumes is specified"
             )
 
+        os.makedirs(volumes_dir, exist_ok=True)
         logger.info("Creating labeled vessel volumes...")
 
         # Validate volume options - only allow edge_id, level, lobe
@@ -894,7 +948,7 @@ def label_vessel_graph(
                     colored_skeleton_path = potential_skeleton_path
 
             volume_output = os.path.join(
-                output_dir,
+                volumes_dir,
                 f"labeled_graph_vessel_volume_{color_by}.nii.gz",
             )
             save_colored_vessel_volume_from_graph(
@@ -903,7 +957,7 @@ def label_vessel_graph(
                 arteries_mask_path=arteries_mask_path,
                 output_path=volume_output,
                 color_by=color_by,
-                colored_skeleton_path=colored_skeleton_path,  # Pass the colored skeleton path
+                colored_skeleton_path=colored_skeleton_path,
             )
             volume_paths[color_by] = volume_output
             logger.info("Vessel volume (%s) saved: %s", color_by, volume_output)
@@ -922,6 +976,7 @@ def analyze_embolisms_complete(
     embolism_mask_path: str,
     patient_name: str,
     output_dir: str,
+    log_id: str,
     vessel_graph_path: str | None = None,
     vessel_mask_path: str | None = None,
     level_mask_path: str | None = None,
@@ -952,13 +1007,31 @@ def analyze_embolisms_complete(
     logger.info("Vessel graph: %s", vessel_graph_path)
     logger.info("Vessel mask: %s", vessel_mask_path)
 
+    # Ensure consistent step-level organization for embolism analysis
+    analysis_output_dir = os.path.normpath(output_dir)
+    if os.path.basename(analysis_output_dir) != "6_embolism_analysis":
+        analysis_output_dir = os.path.join(analysis_output_dir, "6_embolism_analysis")
+
+    logger.info("Effective embolism analysis output directory: %s", analysis_output_dir)
+
     try:
-        os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(analysis_output_dir, exist_ok=True)
+
+        # Create subdirectories
+        graph_dir = os.path.join(analysis_output_dir, "graph")
+        os.makedirs(graph_dir, exist_ok=True)
+        stats_dir = os.path.join(analysis_output_dir, "stats")
+        os.makedirs(stats_dir, exist_ok=True)
 
         # Setup global statistics paths
-        results_base_dir = Path(output_dir).parent
+        results_base_dir = os.path.dirname(output_dir)
+        if log_id:
+            global_stats_dir = Path(results_base_dir) / "global_stats" / log_id
+        else:
+            global_stats_dir = Path(results_base_dir) / "global_stats"
+        global_stats_dir.mkdir(parents=True, exist_ok=True)
         global_enriched_embolism_stats_path = (
-            results_base_dir / "global_embolism_statistics_enriched.csv"
+            global_stats_dir / "global_embolism_statistics_enriched.csv"
         )
 
         # Step 1: Basic embolism analysis
@@ -966,11 +1039,11 @@ def analyze_embolisms_complete(
         basic_results = analyze_embolisms_with_visualization(
             mask_path=embolism_mask_path,
             patient_name=patient_name,
-            output_dir=output_dir,
+            output_dir=analysis_output_dir,
             separation_method=separation_method,
             fusion_threshold=fusion_threshold,
             include_colored_masks=include_colored_masks,
-            global_stats_path=None,
+            global_stats_path=global_enriched_embolism_stats_path,
         )
 
         if basic_results["num_embolisms"] == 0:
@@ -985,7 +1058,15 @@ def analyze_embolisms_complete(
             }
 
         # Check if we can use existing enriched data
-        existing_enriched_graph_path = os.path.join(output_dir, "enriched_graph.json")
+        existing_enriched_graph_path = os.path.join(
+            analysis_output_dir, "graph", "enriched_graph.json"
+        )
+        if not os.path.exists(existing_enriched_graph_path):
+            real_path = os.path.join(
+                analysis_output_dir, "graph", "enriched_graph_real_coords.json"
+            )
+            if os.path.exists(real_path):
+                existing_enriched_graph_path = real_path
 
         can_use_existing = (
             use_existing_enriched_graph
@@ -1003,7 +1084,7 @@ def analyze_embolisms_complete(
                     enriched_graph_path=existing_enriched_graph_path,
                     embolism_metrics_path=basic_results["output_files"]["metrics"],
                     patient_name=patient_name,
-                    output_dir=output_dir,
+                    output_dir=analysis_output_dir,
                     force_recompute=False,
                 )
 
@@ -1092,21 +1173,23 @@ def analyze_embolisms_complete(
 
             # Save the enriched graph
             if coordinate_format == "both":
-                base_path = os.path.join(output_dir, "enriched_graph")
+                base_path = os.path.join(analysis_output_dir, "graph", "enriched_graph")
                 voxel_path, real_path = save_graph_dual_format(
                     enriched_graph, base_path, vessel_mask_path
                 )
                 enriched_graph_paths = {"voxel": voxel_path, "real": real_path}
             elif coordinate_format == "real":
                 enriched_graph_path = os.path.join(
-                    output_dir, "enriched_graph_real_coords.json"
+                    analysis_output_dir, "graph", "enriched_graph_real_coords.json"
                 )
                 save_graph_with_real_coordinates(
                     enriched_graph, enriched_graph_path, vessel_mask_path
                 )
                 enriched_graph_paths = {"real": enriched_graph_path}
             else:
-                enriched_graph_path = os.path.join(output_dir, "enriched_graph.json")
+                enriched_graph_path = os.path.join(
+                    analysis_output_dir, "graph", "enriched_graph.json"
+                )
                 save_graph(enriched_graph, enriched_graph_path)
                 enriched_graph_paths = {"voxel": enriched_graph_path}
 
@@ -1124,7 +1207,7 @@ def analyze_embolisms_complete(
                     else list(enriched_graph_paths.values())[0],
                     embolism_metrics_path=basic_results["output_files"]["metrics"],
                     patient_name=patient_name,
-                    output_dir=output_dir,
+                    output_dir=analysis_output_dir,
                     force_recompute=True,  # Force recompute since we just created the graph
                 )
 
@@ -1186,11 +1269,12 @@ def analyze_embolisms_complete(
 
                 scores = compute_literature_scores(
                     enriched_graph_for_scores,
-                    output_dir,
+                    analysis_output_dir,
                     patient_id=patient_name,
                     compute_qanadli=compute_qanadli,
                     compute_mastora=compute_mastora,
                     obstruction_attr=obstruction_attr,
+                    global_stats_dir=global_stats_dir,
                 )
 
                 for score_name, score_value in scores.items():
@@ -1209,6 +1293,7 @@ def analyze_embolisms_complete(
 def process_patient_complete_pipeline(
     artery_mask_path: str,
     lung_masks_dir: str,
+    log_id: str,
     embolism_mask_path: str | None = None,
     output_dir: str | None = None,
     radius_ratio_threshold: float = 0.3,
@@ -1235,6 +1320,7 @@ def process_patient_complete_pipeline(
     Parameters:
     - artery_mask_path: Path to artery mask file
     - lung_masks_dir: Directory containing lung mask files
+    - log_id: identifier for logging and global stats organization
     - embolism_mask_path: Path to embolism mask file (optional)
     - output_dir: Output directory (defaults to results/patient_name)
     - radius_ratio_threshold: Threshold for cleaning thin branches
@@ -1325,6 +1411,7 @@ def process_patient_complete_pipeline(
                 skeleton_path,
                 distance_map_path,
                 output_dir,
+                log_id=log_id,
                 coordinate_format=coordinate_format,
                 save_skeleton=save_skeletons,
             )
@@ -1333,13 +1420,15 @@ def process_patient_complete_pipeline(
             if stop_after == "build":
                 return pipeline_results
         else:
-            # Define paths for skipped step
+            # Define paths for skipped step (look into build subfolder)
+            build_dir = os.path.join(output_dir, "2_build_graph")
+            graph_dir = os.path.join(build_dir, "graph")
             if coordinate_format == "both":
                 build_result = {
                     "graph_paths": {
-                        "voxel": os.path.join(output_dir, "branch_graph.json"),
+                        "voxel": os.path.join(graph_dir, "branch_graph.json"),
                         "real": os.path.join(
-                            output_dir, "branch_graph_real_coords.json"
+                            graph_dir, "branch_graph_real_coords.json"
                         ),
                     }
                 }
@@ -1347,7 +1436,7 @@ def process_patient_complete_pipeline(
                 build_result = {
                     "graph_paths": {
                         coordinate_format: os.path.join(
-                            output_dir,
+                            graph_dir,
                             f"branch_graph{'_real_coords' if coordinate_format == 'real' else ''}.json",
                         )
                     }
@@ -1367,6 +1456,7 @@ def process_patient_complete_pipeline(
             clean_result = clean_vessel_graph(
                 graph_path=input_graph,
                 output_dir=output_dir,
+                log_id=log_id,
                 original_skeleton_path=skeleton_path,
                 arteries_mask_path=artery_mask_path,
                 radius_ratio_threshold=radius_ratio_threshold,
@@ -1432,16 +1522,28 @@ def process_patient_complete_pipeline(
                     input_graph = oriented_graph_path
                     logger.info("Found existing oriented graph: %s", input_graph)
                 else:
-                    # Also check for real coordinates version
-                    oriented_graph_real_path = os.path.join(
-                        output_dir, "oriented_graph_real_coords.json"
+                    oriented_graph_path = os.path.join(
+                        output_dir, "4_orient_graph", "graph", "oriented_graph.json"
                     )
-                    if os.path.exists(oriented_graph_real_path):
-                        input_graph = oriented_graph_real_path
+                    if os.path.exists(oriented_graph_path):
+                        input_graph = oriented_graph_path
                         logger.info(
-                            "Found existing oriented graph (real coords): %s",
+                            "Found existing oriented graph in orient folder: %s",
                             input_graph,
                         )
+                    else:
+                        oriented_graph_real_path = os.path.join(
+                            output_dir,
+                            "4_orient_graph",
+                            "graph",
+                            "oriented_graph_real_coords.json",
+                        )
+                        if os.path.exists(oriented_graph_real_path):
+                            input_graph = oriented_graph_real_path
+                            logger.info(
+                                "Found existing oriented graph (real coords): %s",
+                                input_graph,
+                            )
 
             # Ensure we have an oriented graph
             if not input_graph:
@@ -1457,6 +1559,7 @@ def process_patient_complete_pipeline(
                 graph_path=input_graph,
                 lung_masks_dir=lung_masks_dir,
                 output_dir=output_dir,
+                log_id=log_id,
                 original_skeleton_path=skeleton_path,
                 arteries_mask_path=artery_mask_path,
                 coordinate_format=coordinate_format,
@@ -1495,6 +1598,61 @@ def process_patient_complete_pipeline(
                     logger.info(f"Found vessel graph: {vessel_graph_path}")
                     break
 
+                # If not found at root, check common step subfolders (e.g., build step)
+                if graph_name == "labeled_graph.json":
+                    potential_label_path = os.path.join(
+                        output_dir, "5_label_graph", "graph", graph_name
+                    )
+                    if os.path.exists(potential_label_path):
+                        vessel_graph_path = potential_label_path
+                        logger.info(
+                            f"Found vessel graph in label folder: {vessel_graph_path}"
+                        )
+                        break
+
+                    potential_label_real_path = os.path.join(
+                        output_dir,
+                        "5_label_graph",
+                        "graph",
+                        "labeled_graph_real_coords.json",
+                    )
+                    if os.path.exists(potential_label_real_path):
+                        vessel_graph_path = potential_label_real_path
+                        logger.info(
+                            f"Found vessel graph in label folder (real coords): {vessel_graph_path}"
+                        )
+                        break
+                if graph_name == "branch_graph.json":
+                    potential_build_path = os.path.join(
+                        output_dir, "2_build_graph", "graph", graph_name
+                    )
+                    if os.path.exists(potential_build_path):
+                        vessel_graph_path = potential_build_path
+                        logger.info(
+                            f"Found vessel graph in build folder: {vessel_graph_path}"
+                        )
+                        break
+                if graph_name == "cleaned_graph.json":
+                    potential_clean_path = os.path.join(
+                        output_dir, "3_clean_graph", "graph", graph_name
+                    )
+                    if os.path.exists(potential_clean_path):
+                        vessel_graph_path = potential_clean_path
+                        logger.info(
+                            f"Found vessel graph in clean folder: {vessel_graph_path}"
+                        )
+                        break
+                if graph_name == "oriented_graph.json":
+                    potential_orient_path = os.path.join(
+                        output_dir, "4_orient_graph", "graph", graph_name
+                    )
+                    if os.path.exists(potential_orient_path):
+                        vessel_graph_path = potential_orient_path
+                        logger.info(
+                            f"Found vessel graph in orient folder: {vessel_graph_path}"
+                        )
+                        break
+
             # Look for vessel volume files (prefer labeled > oriented > cleaned > branch)
             volume_patterns = [
                 # Labeled volumes (most processed)
@@ -1523,13 +1681,40 @@ def process_patient_complete_pipeline(
                 edge_path = os.path.join(output_dir, edge_pattern)
                 level_path = os.path.join(output_dir, level_pattern)
 
-                if os.path.exists(edge_path):
-                    vessel_mask_path = edge_path
-                    logger.info(f"Found vessel volume (edge_id): {vessel_mask_path}")
+                search_paths = [output_dir]
+                if edge_pattern.startswith("labeled_graph"):
+                    search_paths.append(
+                        os.path.join(output_dir, "5_label_graph", "volumes")
+                    )
+                elif edge_pattern.startswith("oriented_graph"):
+                    search_paths.append(
+                        os.path.join(output_dir, "4_orient_graph", "volumes")
+                    )
+                elif edge_pattern.startswith("cleaned_graph"):
+                    search_paths.append(
+                        os.path.join(output_dir, "3_clean_graph", "volumes")
+                    )
+                elif edge_pattern.startswith("branch_graph"):
+                    search_paths.append(
+                        os.path.join(output_dir, "2_build_graph", "volumes")
+                    )
 
-                if os.path.exists(level_path):
-                    level_mask_path = level_path
-                    logger.info(f"Found vessel volume (level): {level_mask_path}")
+                for search_root in search_paths:
+                    candidate_edge = os.path.join(search_root, edge_pattern)
+                    candidate_level = os.path.join(search_root, level_pattern)
+
+                    if os.path.exists(candidate_edge):
+                        vessel_mask_path = candidate_edge
+                        logger.info(
+                            f"Found vessel volume (edge_id): {vessel_mask_path}"
+                        )
+
+                    if os.path.exists(candidate_level):
+                        level_mask_path = candidate_level
+                        logger.info(f"Found vessel volume (level): {level_mask_path}")
+
+                    if vessel_mask_path:
+                        break
 
                 if vessel_mask_path:  # Use the first set found
                     break
@@ -1549,6 +1734,7 @@ def process_patient_complete_pipeline(
                 embolism_mask_path=embolism_mask_path,
                 patient_name=patient_name,
                 output_dir=output_dir,
+                log_id=log_id,
                 vessel_graph_path=vessel_graph_path,
                 vessel_mask_path=vessel_mask_path,
                 level_mask_path=level_mask_path,

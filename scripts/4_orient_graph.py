@@ -24,7 +24,7 @@ def main():
     parser.add_argument(
         "--graph",
         required=True,
-        help="Input graph file path (e.g. results/0001/cleaned_graph.json)",
+        help="Input graph file path (e.g. results/0001/3_clean_graph/graph/cleaned_graph.json)",
     )
     parser.add_argument(
         "--original-skeleton",
@@ -46,6 +46,7 @@ def main():
         help="Coordinate format for saved graph: voxel, real-world, or both (default)",
     )
     parser.add_argument(
+        "--save-skeletons",
         "--save-skeleton",
         action="store_true",
         help="Save both binary and edge_id colored skeleton from graph",
@@ -56,6 +57,16 @@ def main():
         choices=["edge_id", "level", "lobe"],
         help="Save vessel volumes with specified coloring",
     )
+    parser.add_argument(
+        "--save-all-step-volumes",
+        action="store_true",
+        help="Save vessel volumes at each processing step",
+    )
+    parser.add_argument(
+        "--save-cycle-skeletons",
+        action="store_true",
+        help="Save skeletons of detected cycles before and after cleaning",
+    )
 
     args = parser.parse_args()
 
@@ -65,23 +76,27 @@ def main():
     try:
         # Extract patient name for default output directory
         if not args.output_dir:
-            graph_basename = os.path.basename(args.graph)
-            if "cleaned_graph" in graph_basename or "branch_graph" in graph_basename:
-                patient_name = os.path.basename(os.path.dirname(args.graph))
+            path = os.path.normpath(args.graph)
+            parts = path.split(os.sep)
+            if "results" in parts:
+                results_index = parts.index("results")
+                if results_index + 1 < len(parts):
+                    patient_name = parts[results_index + 1]
+                else:
+                    patient_name = os.path.basename(os.path.dirname(path))
             else:
-                patient_name = graph_basename.split("_")[0]
+                patient_name = os.path.basename(os.path.dirname(path))
             output_dir = os.path.join("results", patient_name)
         else:
             output_dir = args.output_dir
 
         logger.info("Orienting graph: %s -> %s", args.graph, output_dir)
 
-        if args.coordinate_format != "both":
-            logger.info("Coordinate format: %s", args.coordinate_format)
-        if args.save_skeleton:
-            logger.info("Saving skeleton files")
-        if args.save_colored_volumes:
-            logger.info("Saving colored volumes: %s", args.save_colored_volumes)
+        logger.info("Coordinate format: %s", args.coordinate_format)
+        logger.info("Save skeletons: %s", args.save_skeletons)
+        logger.info("Save colored volumes: %s", args.save_colored_volumes)
+        logger.info("Save all step volumes: %s", args.save_all_step_volumes)
+        logger.info("Save cycle skeletons: %s", args.save_cycle_skeletons)
 
         orient_vessel_graph(
             graph_path=args.graph,
@@ -89,7 +104,7 @@ def main():
             original_skeleton_path=args.original_skeleton,
             arteries_mask_path=args.arteries_mask,
             coordinate_format=args.coordinate_format,
-            save_skeleton=args.save_skeleton,
+            save_skeleton=args.save_skeletons,
             save_colored_volumes=args.save_colored_volumes,
         )
 

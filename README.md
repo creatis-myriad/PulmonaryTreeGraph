@@ -104,7 +104,7 @@ These options are grouped by purpose to make it easier to configure batch runs.
 #### Processing options
 
 - `--radius-ratio-threshold`: Threshold for radius ratio to remove thin branches (default: `0.3`).
-- `--diameter-threshold`: Minimum diameter ratio for trunk vessels (default: `0.5`).
+- `--diameter-threshold`: Minimum diameter ratio for trunk vessels (default: `0.7`).
 - `--length-threshold`: Maximum length/diameter ratio for trunk vessels (default: `1.5`).
 - `--coordinate-format`: Coordinate format for saved graphs: `voxel`, `real`, or `both` (default: `both`).
 - `--save-skeletons`: Save binary and edge_id skeletons at each step.
@@ -142,6 +142,8 @@ These options are grouped by purpose to make it easier to configure batch runs.
 - `--generate-heatmaps`: Generate segment heatmaps after processing.
 - `--batch-name`: Name for the batch (used in heatmap titles, defaults to the output directory name).
 - `--comparison-batches`: List of other batch directories for comparison heatmaps.
+
+#### Scores
 - `--scores-only`: Only compute literature scores from existing enriched graphs and skip the pipeline.
 
 ## Step-by-Step Pipeline
@@ -181,33 +183,29 @@ results/patient_001/1_preprocessing/
 python scripts/2_build_graph.py \
     --skeleton results/patient_001/1_preprocessing/skeleton.nii.gz \
     --distance-map results/patient_001/1_preprocessing/distance_map.nii.gz
-
-# With skeleton visualization and validation
-python scripts/2_build_graph.py \
-    --skeleton results/patient_001/1_preprocessing/skeleton.nii.gz \
-    --distance-map results/patient_001/1_preprocessing/distance_map.nii.gz \
-    --save-skeleton \
-    --detailed-validation
-
-# Specify coordinate format
-python scripts/2_build_graph.py \
-    --skeleton results/patient_001/1_preprocessing/skeleton.nii.gz \
-    --distance-map results/patient_001/1_preprocessing/distance_map.nii.gz \
-    --coordinate-format real
+    --output-dir results/patient_001/2_build_graph/
 ```
 
 **Key Options**:
-- `--coordinate-format`: `voxel`, `real`, or `both` (default: both)
-- `--save-skeleton`: Generate skeleton reconstructions for validation
-- `--detailed-validation`: Show comprehensive validation metrics
+- `--coordinate-format`: `voxel`, `real`, or `both` (default: both) :
+    - `voxel`: Save graph with voxel coordinates.
+    - `real`: Save graph with real-world coordinates in millimeters.
+    - `both`: Save both versions of the graph.
+- `--save-skeletons`: Generate skeleton reconstructions for validation :
+    - `branch_graph_skeleton.nii.gz`: Binary skeleton of the graph.
+    - `branch_graph_skeleton_edge_id.nii.gz`: Skeleton colored by edge ID for visual validation.
 
 **Output**:
 ```
-results/patient_001/
-├── branch_graph.json                     # Graph with voxel coordinates
-├── branch_graph_real_coords.json         # Graph with real-world coordinates (mm)
-├── branch_graph_skeleton.nii.gz          # Reconstructed skeleton (validation)
-└── branch_graph_skeleton_edge_id.nii.gz  # Colored skeleton by segment
+results/patient_001/2_build_graph/
+├── graph/
+│   ├── branch_graph.json                 # Graph with voxel coordinates
+│   └── branch_graph_real_coords.json     # Graph with real-world coordinates (mm)
+├── skeleton/
+│   ├── branch_graph_skeleton.nii.gz      # Reconstructed skeleton (validation)
+│   └── branch_graph_skeleton_edge_id.nii.gz  # Colored skeleton by segment
+└── stats/
+    └── graph_constructions_stats.csv    # Construction statistics for the graph
 ```
 
 ### Step 3: Graph Cleaning (`3_clean_graph.py`)
@@ -219,33 +217,54 @@ results/patient_001/
 ```bash
 # Basic cleaning with default threshold
 python scripts/3_clean_graph.py \
-    --graph results/patient_001/branch_graph.json
+    --graph results/patient_001/2_build_graph/graph/branch_graph.json
 
 # Custom radius ratio threshold and visualization
 python scripts/3_clean_graph.py \
-    --graph results/patient_001/branch_graph.json \
+    --graph results/patient_001/2_build_graph/graph/branch_graph.json \
     --radius-ratio-threshold 0.3 \
-    --save-skeleton \
+    --save-skeletons \
     --save-colored-volumes edge_id
 
 # Multiple visualization types
 python scripts/3_clean_graph.py \
-    --graph results/patient_001/branch_graph.json \
+    --graph results/patient_001/2_build_graph/graph/branch_graph.json \
     --save-colored-volumes edge_id level lobe
 ```
 
 **Key Options**:
 - `--radius-ratio-threshold`: Minimum radius ratio for branch preservation (default: 0.3)
-- `--save-skeleton`: Generate cleaned skeleton files
-- `--save-colored-volumes`: Create colored volume visualizations
+- `--save-skeletons`: Generate cleaned skeleton files :
+    - `cleaned_graph_skeleton.nii.gz`: Binary skeleton of the cleaned graph.
+    - `cleaned_graph_skeleton_edge_id.nii.gz`: Skeleton colored by edge ID for validation.
+- `--save-colored-volumes`: Create colored volume visualizations :
+    - `edge_id`: Color by segment ID.
+    - `level`: Color by hierarchical level.
+    - `lobe`: Color by lobe assignment (requires lung masks).
+- `--save-cycle-skeletons`: Save skeletons of detected cycles before and after cleaning for validation :
+    - `before_cleaning/`: Skeleton of detected cycles before cleaning.
+    - `after_cleaning/`: Skeleton of remaining cycles after cleaning.
 
 **Output**:
 ```
-results/patient_001/
-├── cleaned_graph.json                    # Cleaned graph structure
-├── cleaned_graph_real_coords.json        # Real-world coordinate version
-├── cleaned_graph_skeleton.nii.gz         # Cleaned skeleton
-└── cleaned_graph_vessel_volume_edge_id.nii.gz  # Colored vessel volume
+results/patient_001/3_clean_graph/
+├── cycle_skeletons/
+│   ├── before_cleaning/
+│   │   ├── 001_cycle_before_1.nii.gz
+│   │   └── 001_cycle_before_2.nii.gz
+│   └── after_cleaning/
+│       ├── 001_cycle_after_1.nii.gz
+│       └── 001_cycle_after_2.nii.gz
+├── graph/
+│   ├── cleaned_graph.json                # Cleaned graph structure (voxel coords)
+│   └── cleaned_graph_real_coords.json    # Cleaned graph (real coords)
+├── skeleton/
+│   ├── cleaned_graph_skeleton.nii.gz     # Cleaned skeleton (binary)
+│   └── cleaned_graph_skeleton_edge_id.nii.gz  # Colored skeleton by segment
+├── stats/
+│   └── graph_cleaning_stats.csv          # Cleaning statistics and metrics
+└── volumes/
+    └── cleaned_graph_vessel_volume_edge_id.nii.gz  # Colored vessel volume (if enabled)
 ```
 
 ### Step 4: Graph Orientation (`4_orient_graph.py`)
@@ -257,22 +276,26 @@ results/patient_001/
 ```bash
 # Basic orientation
 python scripts/4_orient_graph.py \
-    --graph results/patient_001/cleaned_graph.json
+    --graph results/patient_001/3_clean_graph/graph/cleaned_graph.json
 
 # With visualization outputs
 python scripts/4_orient_graph.py \
-    --graph results/patient_001/cleaned_graph.json \
+    --graph results/patient_001/3_clean_graph/graph/cleaned_graph.json \
     --save-skeleton \
-    --save-colored-volumes edge_id level
+    --save-colored-volumes edge_id
 ```
 
 **Output**:
 ```
-results/patient_001/
-├── oriented_graph.json                   # Oriented graph with flow direction
-├── oriented_graph_real_coords.json       # Real-world coordinates
-├── oriented_graph_skeleton_level.nii.gz  # Skeleton colored by hierarchy level
-└── oriented_graph_vessel_volume_level.nii.gz  # Volume colored by hierarchy
+results/patient_001/4_orient_graph/
+├── graph/
+│   ├── oriented_graph.json               # Oriented graph with flow direction
+│   └── oriented_graph_real_coords.json   # Real-world coordinates
+├── skeleton/
+│   ├── oriented_graph_skeleton.nii.gz    # Skeleton colored by lowest hierarchy level
+│   └── oriented_graph_skeleton_edge_id.nii.gz  # Colored skeleton by segment
+└── volumes/
+    └── oriented_graph_vessel_volume_edge_id.nii.gz  # Volume colored by edge_id (if enabled)
 ```
 
 ### Step 5: Anatomical Labeling (`5_label_graph.py`)
@@ -282,14 +305,15 @@ results/patient_001/
 **Process**: Uses spatial intersection with lung masks and morphological criteria to label vessels.
 
 ```bash
-# Basic labeling with lung masks
+# Basic labeling with lung masks, and enabling edge_id volume visualization (required for embolism analysis)
 python scripts/5_label_graph.py \
-    --graph results/patient_001/oriented_graph.json \
+    --graph results/patient_001/4_orient_graph/graph/oriented_graph.json \
     --lung-masks-dir data/patient_001_lungs/
+    --save-colored-volumes edge_id
 
-# With custom thresholds and visualization
+# With custom thresholds and volume visualization
 python scripts/5_label_graph.py \
-    --graph results/patient_001/oriented_graph.json \
+    --graph results/patient_001/4_orient_graph/graph/oriented_graph.json \
     --lung-masks-dir data/patient_001_lungs/ \
     --diameter-threshold 0.6 \
     --length-threshold 2.0 \
@@ -297,7 +321,7 @@ python scripts/5_label_graph.py \
 ```
 
 **Key Options**:
-- `--diameter-threshold`: Minimum diameter for trunk vessels (default: 0.5)
+- `--diameter-threshold`: Minimum diameter for trunk vessels (default: 0.7)
 - `--length-threshold`: Minimum length for trunk vessels (default: 1.5)
 - `--save-colored-volumes`: Visualization by different anatomical properties
 
@@ -315,12 +339,20 @@ data/patient_001_lungs/
 
 **Output**:
 ```
-results/patient_001/
-├── labeled_graph.json                    # Anatomically labeled graph
-├── labeled_graph_real_coords.json        # Real-world coordinates
-├── labeled_graph_vessel_volume_lobe.nii.gz      # Volume colored by lobe
-├── labeled_graph_vessel_volume_level.nii.gz     # Volume colored by level
-└── labeled_graph_skeleton_level.nii.gz          # Skeleton colored by level
+results/patient_001/5_label_graph/
+├── graph/
+│   ├── labeled_graph.json                    # Anatomically labeled graph
+│   └── labeled_graph_real_coords.json        # Real-world coordinates
+├── skeleton/
+│   ├── labeled_graph_skeleton.nii.gz         # Clean binary skeleton from labeled graph
+│   ├── labeled_graph_skeleton_edge_id.nii.gz # Colored skeleton by segment
+│   └── labeled_graph_skeleton_level.nii.gz   # Colored skeleton by hierarchy level
+├── stats/
+│   └── graph_labelling_stats.csv             # Labeling statistics and metrics
+└── volumes/
+    ├── labeled_graph_vessel_volume_edge_id.nii.gz  # Volume colored by edge_id (if enabled, require for embolism analysis)
+    ├── labeled_graph_vessel_volume_level.nii.gz    # Volume colored by level (if enabled)
+    └── labeled_graph_vessel_volume_lobe.nii.gz     # Volume colored by lobe (if enabled)
 ```
 
 ### Step 6: Embolic Analysis (`6_analyze_embolism.py`)
@@ -339,14 +371,14 @@ python scripts/6_analyze_embolism.py \
 python scripts/6_analyze_embolism.py \
     --embolism-mask data/patient_001_embolism.nii.gz \
     --patient-name patient_001 \
-    --vessel-graph results/patient_001/labeled_graph.json \
+    --vessel-graph results/patient_001/5_label_graph/graph/labeled_graph.json \
     --vessel-mask data/patient_001_arteries.nii.gz
 
 # With custom separation parameters
 python scripts/6_analyze_embolism.py \
     --embolism-mask data/patient_001_embolism.nii.gz \
     --patient-name patient_001 \
-    --vessel-graph results/patient_001/labeled_graph.json \
+    --vessel-graph results/patient_001/5_label_graph/graph/labeled_graph.json \
     --vessel-mask data/patient_001_arteries.nii.gz \
     --separation-method connected_components_with_threshold \
     --fusion-threshold 8.0 \
@@ -362,15 +394,62 @@ python scripts/6_analyze_embolism.py \
 
 **Output**:
 ```
-results/patient_001/embolism_analysis/
-├── patient_001_embolism_report.txt       # Statistical summary
-├── patient_001_embolism_metrics.csv      # Quantitative metrics
-├── embolic_masks_colored.nii.gz          # Visualization with emboli IDs
-├── individual_emboli/                    # Individual embolic masks
-│   ├── embolism_1.nii.gz
-│   ├── embolism_2.nii.gz
-│   └── ...
-└── enriched_graph.json                   # Graph with obstruction metrics (if integrated)
+results/patient_001/6_embolism_analysis/
+├── graph/                                # Only created when full vascular integration is performed
+│   ├── enriched_graph.json               # Enriched embolism-vessel graph
+│   └── enriched_graph_real_coords.json   # Real-world coordinate version
+├── reports/
+│   └── 001_embolism_report.txt   # Statistical summary
+├── scores/
+│   ├── mastora_scores.csv  # Mastora obstruction scores (if enabled)
+│   └── qanadli_scores.csv   # Qanadli obstruction scores (if enabled)
+├── stats/
+│   ├── 001_embolism_metrics.csv  # Embolism metrics (volume, location, etc.)
+│   └── 001_embolism_metrics_enriched.csv  # Enriched embolism metrics with vascular integration (if performed)
+└── volumes/
+    ├── 001_embolisms_colored.nii.gz      # Visualization with emboli IDs
+    └── individual_emboli/                # Individual embolism masks
+        ├── 001_embolism_1.nii.gz
+        ├── 001_embolism_2.nii.gz
+        └── ...
+```
+
+### Batch Report and Global Statistics Layout
+
+Batch runs now collect report files and global stats in dedicated, timestamped folders under the batch output root.
+
+For example:
+
+```
+/path/to/results/
+├── reports/
+│   └── 1700000000/                          # run ID folder
+│       └── batch_processing_report_1700000000.txt
+└── global_stats/
+    └── 1700000000/                          # same run ID folder
+        ├── global_construction_stats.csv
+        ├── global_cleaning_stats.csv
+        ├── global_labelling_stats.csv
+        ├── global_embolism_statistics_enriched.csv
+        ├── global_qanadli_scores.csv
+        └── global_mastora_scores.csv
+```
+
+### Patient-level Scores
+
+When literature scores are computed, patient score files are saved inside a dedicated `scores/` folder beneath the patient output directory.
+
+Example:
+
+```
+results/patient_001/
+├── scores/
+│   ├── qanadli_scores.csv
+│   └── mastora_scores.csv
+└── 6_embolism_analysis/
+    ├── graph/
+    ├── reports/
+    └── volumes/
 ```
 
 ## Pipeline Outputs Summary
@@ -380,38 +459,76 @@ After complete processing, the full output structure contains:
 ```
 results/patient_001/
 ├── 1_preprocessing/
-│   ├── skeleton.nii.gz                   # Step 1: Preprocessing
+│   ├── skeleton.nii.gz
 │   └── distance_map.nii.gz
-├── branch_graph.json                     # Step 2: Graph construction
-├── branch_graph_real_coords.json
-├── cleaned_graph.json                    # Step 3: Graph cleaning
-├── cleaned_graph_real_coords.json
-├── oriented_graph.json                   # Step 4: Graph orientation
-├── oriented_graph_real_coords.json
-├── labeled_graph.json                    # Step 5: Anatomical labeling
-├── labeled_graph_real_coords.json
-├── enriched_graph.json                   # Step 6: Embolic integration (if applicable)
-├── *_skeleton*.nii.gz                    # Skeleton visualizations
-├── *_vessel_volume_*.nii.gz              # Vessel volume visualizations
-└── embolism_analysis/                    # Embolic analysis results
-    ├── patient_001_embolism_report.txt
-    ├── patient_001_embolism_metrics.csv
-    ├── embolic_masks_colored.nii.gz
-    └── individual_emboli/
-```
-
-## Configuration Options
-
-Most scripts support common configuration options:
-
-- `--output-dir`: Specify custom output directory
-- `--coordinate-format`: Choose coordinate system (`voxel`, `real`, `both`)
-- `--save-skeleton`: Generate skeleton visualizations
-- `--save-colored-volumes`: Create colored volume visualizations
-- Various thresholds and parameters specific to each analysis step
-
-For detailed options of each script, use the `--help` flag:
-
-```bash
-python scripts/[script_name].py --help
+├── 2_build_graph/
+│   ├── graph/
+│   │   ├── branch_graph.json
+│   │   └── branch_graph_real_coords.json
+│   ├── skeleton/
+│   │   ├── branch_graph_skeleton.nii.gz
+│   │   └── branch_graph_skeleton_edge_id.nii.gz
+│   └── stats/
+│       └──graph_construction_stats.csv
+├── 3_clean_graph/
+│   ├── cycle_skeletons/
+│   │   ├── before_cleaning/
+│   │   │   ├── 001_cycle_before_1.nii.gz
+│   │   │   └── 001_cycle_before_2.nii.gz
+│   │   └── after_cleaning/
+│   │       ├── 001_cycle_after_1.nii.gz
+│   │       └── 001_cycle_after_2.nii.gz
+│   ├── graph/
+│   │   ├── cleaned_graph.json
+│   │   └── cleaned_graph_real_coords.json
+│   ├── skeleton/
+│   │   ├── cleaned_graph_skeleton.nii.gz
+│   │   └── cleaned_graph_skeleton_edge_id.nii.gz
+│   ├── stats/
+│   │   └── graph_cleaning_stats.csv
+│   └── volumes/
+│       └── cleaned_graph_vessel_volume_edge_id.nii.gz
+├── 4_orient_graph/
+│   ├── graph/
+│   │   ├── oriented_graph.json
+│   │   └── oriented_graph_real_coords.json
+│   ├── skeleton/
+│   │   ├── oriented_graph_skeleton.nii.gz
+│   │   └── oriented_graph_skeleton_edge_id.nii.gz
+│   └── volumes/
+│       └── oriented_graph_vessel_volume_edge_id.nii.gz
+├── 5_label_graph/
+│   ├── graph/
+│   │   ├── labeled_graph.json
+│   │   └── labeled_graph_real_coords.json
+│   ├── skeleton/
+│   │   ├── labeled_graph_skeleton.nii.gz
+│   │   ├── labeled_graph_skeleton_edge_id.nii.gz
+│   │   └── labeled_graph_skeleton_level.nii.gz
+│   ├── stats/
+│   │   └── graph_labelling_stats.csv
+│   └── volumes/
+│       ├── labeled_graph_vessel_volume_edge_id.nii.gz
+│       ├── labeled_graph_vessel_volume_level.nii.gz
+│       └── labeled_graph_vessel_volume_lobe.nii.gz
+└── 6_embolism_analysis/
+    ├── graph/
+    │   ├── enriched_graph.json
+    │   └── enriched_graph_real_coords.json
+    ├── reports/
+    │   ├── 001_embolism_report.txt
+    │   ├── 001_embolism_metrics.csv
+    │   └── 001_embolism_metrics_enriched.csv
+    ├── scores/
+    │   ├── 001_qanadli_scores.csv
+    │   └── 001_mastora_scores.csv
+    ├── stats/
+    │   ├── 001_embolism_metrics.csv
+    │   └── 001_embolism_metrics_enriched.csv
+    └── volumes/
+        ├── 001_embolisms_colored.nii.gz
+        └── individual_emboli/
+            ├── 001_embolism_1.nii.gz
+            ├── 001_embolism_2.nii.gz
+            └── ...
 ```

@@ -393,10 +393,22 @@ def _append_enriched_embolism_stats_to_csv(
         patient_id.split("_")[0][-4:] if "_" in patient_id else patient_id[-4:]
     )
 
+    # Find the largest embolism volume (exclude total row)
+    non_total_rows = enriched_df[enriched_df["embolism_id"] != "total"]
+    largest_embolism_id = None
+
+    if len(non_total_rows) > 0:
+        max_idx = non_total_rows["volume_mm3"].idxmax()
+        largest_embolism_id = enriched_df.at[max_idx, "embolism_id"]
+
     with open(output_path, "a", newline="") as csvfile:
         writer = csv.writer(csvfile)
 
         for _, row in enriched_df.iterrows():
+            # Determine if this is the largest embolism
+            is_largest = row.get("embolism_id") == largest_embolism_id
+            is_total = row.get("embolism_id") == "total"
+
             # Prepare row data with all columns
             csv_row = [
                 patient_id_clean,
@@ -407,8 +419,8 @@ def _append_enriched_embolism_stats_to_csv(
                 f"{row.get('volume_mm3', 0):.6f}",
                 f"{row.get('volume_cm3', 0):.6f}",
                 f"{row.get('percentage_of_total', 0):.2f}",
-                row.get("embolism_id") == "total",  # is_largest_embolism logic needed
-                row.get("embolism_id") == "total",  # is_total_summary
+                is_largest,  # is_largest_embolism - only True for actual largest
+                is_total,  # is_total_summary
                 len(enriched_df) - 1
                 if "total" in enriched_df["embolism_id"].values
                 else len(enriched_df),
@@ -508,15 +520,26 @@ def analyze_embolism_regions(
         # Calculate totals using metrics utility
         total_mm3, total_cm3 = calculate_total_volume(embolism_objects, "volume_mm3")
 
-        # Create output directory
+        # Create output directory and nested step folders
         logger.info("Creating output directory: %s", output_dir)
         os.makedirs(output_dir, exist_ok=True)
+
+        reports_dir = os.path.join(output_dir, "reports")
+        volumes_dir = os.path.join(output_dir, "volumes")
+        stats_dir = os.path.join(output_dir, "stats")
+        individual_emboli_dir = os.path.join(volumes_dir, "individual_emboli")
+        os.makedirs(reports_dir, exist_ok=True)
+        os.makedirs(volumes_dir, exist_ok=True)
+        os.makedirs(stats_dir, exist_ok=True)
+        os.makedirs(individual_emboli_dir, exist_ok=True)
 
         # Save individual masks
         mask_paths = []
         try:
             logger.info("Saving individual embolism masks")
-            mask_paths = save_embolism_masks(embolism_objects, mask_path, output_dir)
+            mask_paths = save_embolism_masks(
+                embolism_objects, mask_path, individual_emboli_dir
+            )
             logger.info(
                 "Successfully saved %d individual embolism masks", len(mask_paths)
             )
@@ -524,7 +547,7 @@ def analyze_embolism_regions(
             logger.error("Error saving individual masks: %s", e)
 
         # Generate report
-        report_path = os.path.join(output_dir, f"{patient_name}_embolism_report.txt")
+        report_path = os.path.join(reports_dir, f"{patient_name}_embolism_report.txt")
         try:
             logger.info("Generating embolism report at %s", report_path)
             generate_embolism_report(embolism_objects, patient_name, report_path)
@@ -533,7 +556,7 @@ def analyze_embolism_regions(
             logger.error("Error generating embolism report: %s", e)
 
         # Save metrics (enhanced with global stats)
-        metrics_path = os.path.join(output_dir, f"{patient_name}_embolism_metrics.csv")
+        metrics_path = os.path.join(stats_dir, f"{patient_name}_embolism_metrics.csv")
         try:
             logger.info("Saving embolism metrics to %s", metrics_path)
             save_embolism_metrics(
@@ -605,12 +628,19 @@ def analyze_embolisms_with_visualization(
         "Starting embolism analysis with visualization for patient %s", patient_name
     )
 
+    # Ensure consistent step-level organization for embolism analysis
+    analysis_output_dir = os.path.normpath(output_dir)
+    if os.path.basename(analysis_output_dir) != "6_embolism_analysis":
+        analysis_output_dir = os.path.join(analysis_output_dir, "6_embolism_analysis")
+    os.makedirs(analysis_output_dir, exist_ok=True)
+    logger.info("Embolism analysis output directory: %s", analysis_output_dir)
+
     try:
         # Basic embolism analysis (now with global stats support)
         results = analyze_embolism_regions(
             mask_path=mask_path,
             patient_name=patient_name,
-            output_dir=output_dir,
+            output_dir=analysis_output_dir,
             separation_method=separation_method,
             fusion_threshold=fusion_threshold,
             global_stats_path=global_stats_path,
@@ -627,7 +657,7 @@ def analyze_embolisms_with_visualization(
                 colored_path = create_colored_embolism_masks(
                     embolism_objects=results["embolism_objects"],
                     original_mask_path=mask_path,
-                    output_dir=output_dir,
+                    output_dir=os.path.join(analysis_output_dir, "volumes"),
                 )
                 results["output_files"]["colored_mask"] = colored_path
 
@@ -673,9 +703,13 @@ def redistribute_embolism_anatomical_data(
     logger.info(f"  Embolism metrics: {embolism_metrics_path}")
 
     try:
+        # Create stats subdirectory if it doesn't exist
+        stats_dir = os.path.join(output_dir, "stats")
+        os.makedirs(stats_dir, exist_ok=True)
+
         # Check if already processed
         enriched_metrics_path = os.path.join(
-            output_dir, f"{patient_name}_embolism_metrics_enriched.csv"
+            stats_dir, f"{patient_name}_embolism_metrics_enriched.csv"
         )
 
         if not force_recompute and os.path.exists(enriched_metrics_path):

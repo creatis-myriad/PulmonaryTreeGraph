@@ -38,7 +38,7 @@ def main():
     try:
         # Extract patient name for default output directory
         if not args.output_dir:
-            patient_name = os.path.basename(args.artery).replace("_arteries.nii.gz", "")
+            patient_name = os.path.basename(args.artery).replace(".nii.gz", "")
             output_dir = os.path.join("results", patient_name)
         else:
             output_dir = args.output_dir

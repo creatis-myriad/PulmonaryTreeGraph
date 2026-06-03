@@ -20,6 +20,7 @@ def compute_literature_scores(
     compute_qanadli: bool = False,
     compute_mastora: bool = False,
     obstruction_attr: str = "volumetric_obstruction",
+    global_stats_dir: str | None = None,
 ) -> dict[str, float]:
     """
     Compute literature-based obstruction scores for an enriched vessel graph.
@@ -30,6 +31,7 @@ def compute_literature_scores(
         patient_id: Patient identifier
         compute_qanadli: Whether to compute Qanadli score
         compute_mastora: Whether to compute Mastora scores (all variants)
+        global_stats_dir: Optional directory for global statistics files
 
     Returns:
         Dictionary with computed scores
@@ -42,25 +44,48 @@ def compute_literature_scores(
         logger.info("No literature scores requested")
         return scores
 
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
     # Setup paths for statistics
     if patient_id:
-        results_base_dir = Path(output_dir).parent
+        scores_dir = output_path / "scores"
+        scores_dir.mkdir(parents=True, exist_ok=True)
 
         # Individual patient paths
         patient_qanadli_path = (
-            Path(output_dir) / "qanadli_scores.csv" if compute_qanadli else None
+            scores_dir / "qanadli_scores.csv" if compute_qanadli else None
         )
         patient_mastora_path = (
-            Path(output_dir) / "mastora_scores.csv" if compute_mastora else None
+            scores_dir / "mastora_scores.csv" if compute_mastora else None
         )
 
         # Global paths
-        global_qanadli_path = (
-            results_base_dir / "global_qanadli_scores.csv" if compute_qanadli else None
-        )
-        global_mastora_path = (
-            results_base_dir / "global_mastora_scores.csv" if compute_mastora else None
-        )
+        if global_stats_dir:
+            global_stats_path = Path(global_stats_dir)
+            global_stats_path.mkdir(parents=True, exist_ok=True)
+            global_qanadli_path = (
+                global_stats_path / "global_qanadli_scores.csv"
+                if compute_qanadli
+                else None
+            )
+            global_mastora_path = (
+                global_stats_path / "global_mastora_scores.csv"
+                if compute_mastora
+                else None
+            )
+        else:
+            results_base_dir = output_path.parent
+            global_qanadli_path = (
+                results_base_dir / "global_qanadli_scores.csv"
+                if compute_qanadli
+                else None
+            )
+            global_mastora_path = (
+                results_base_dir / "global_mastora_scores.csv"
+                if compute_mastora
+                else None
+            )
     else:
         patient_qanadli_path = None
         patient_mastora_path = None
