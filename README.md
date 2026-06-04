@@ -105,7 +105,13 @@ These options are grouped by purpose to make it easier to configure batch runs.
 
 ##### Cleaning options
 - `--save-cycle-skeletons`: Save skeletons of detected cycles before and after cleaning.
+##### Cleaning options
+- `--save-cycle-skeletons`: Save skeletons of detected cycles before and after cleaning.
 - `--radius-ratio-threshold`: Threshold for radius ratio to remove thin branches (default: `0.3`).
+- `--protect-not-only-central-vessels`: Whether to protect only the largest central vessel or all large terminal vessels during cleaning. If set, all terminal vessels above the diameter threshold will be protected, regardless of their centrality (default: `False`, adapted to pulmonary anatomy).
+- `--min-diameter-vessel-protected`: Minimum diameter (in mm) of vessels to protect during cleaning (default: 10.0).
+
+##### Labeling options
 - `--protect-not-only-central-vessels`: Whether to protect only the largest central vessel or all large terminal vessels during cleaning. If set, all terminal vessels above the diameter threshold will be protected, regardless of their centrality (default: `False`, adapted to pulmonary anatomy).
 - `--min-diameter-vessel-protected`: Minimum diameter (in mm) of vessels to protect during cleaning (default: 10.0).
 
@@ -115,12 +121,17 @@ These options are grouped by purpose to make it easier to configure batch runs.
 - `--save-colored-volumes`: Save vessel volumes with specified coloring. Valid values: `edge_id`, `level`, `lobe`. (The `edge_id` option is required for embolism analysis and will be automatically enabled if `--vessel-graph` is provided for embolism analysis, but can also be enabled during cleaning and labeling steps for visual validation).
 
 ##### Visualization options
+- `--save-colored-volumes`: Save vessel volumes with specified coloring. Valid values: `edge_id`, `level`, `lobe`. (The `edge_id` option is required for embolism analysis and will be automatically enabled if `--vessel-graph` is provided for embolism analysis, but can also be enabled during cleaning and labeling steps for visual validation).
+
+##### Visualization options
 - `--coordinate-format`: Coordinate format for saved graphs: `voxel`, `real`, or `both` (default: `both`).
 - `--save-skeletons`: Save binary and edge_id skeletons at each step.
 - `--save-all-step-volumes`: Save vessel volumes at every processing step.
 
 #### Embolism and enriched graph options
 
+- `--embolism-separation-method`: Method for separating embolisms: `connected_components` or `connected_components_with_threshold`, default `connected_components`.
+- `--embolism-fusion-threshold`: Distance threshold for fusing nearby embolism components (default: `10.0`mm).
 - `--embolism-separation-method`: Method for separating embolisms: `connected_components` or `connected_components_with_threshold`, default `connected_components`.
 - `--embolism-fusion-threshold`: Distance threshold for fusing nearby embolism components (default: `10.0`mm).
 - `--save-enriched-graphs`: Save enriched graphs into a central `enriched_graphs` folder under the output directory.
@@ -146,6 +157,7 @@ These options are grouped by purpose to make it easier to configure batch runs.
 
 #### Heatmap generation
 
+- `--generate-heatmaps`: Generate segmental arteries heatmaps after processing.
 - `--generate-heatmaps`: Generate segmental arteries heatmaps after processing.
 - `--batch-name`: Name for the batch (used in heatmap titles, defaults to the output directory name).
 - `--comparison-batches`: List of other batch directories for comparison heatmaps.
