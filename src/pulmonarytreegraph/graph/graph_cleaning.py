@@ -1757,7 +1757,11 @@ def _filter_removal_to_protect_largest(
 
 
 def _remove_artefact_branches(
-    graph: nx.Graph, radius_ratio_threshold: float, length_ratio_threshold: float
+    graph: nx.Graph,
+    radius_ratio_threshold: float,
+    length_ratio_threshold: float,
+    protect_largest_central: bool,
+    min_diameter_vessel_protected: float = 10.0,
 ) -> int:
     """
     Remove terminal branches identified as artifacts with safety protections.
@@ -1770,6 +1774,8 @@ def _remove_artefact_branches(
         graph: NetworkX graph to clean (modified in-place)
         radius_ratio_threshold: Minimum end/parent radius ratio to preserve branches
         length_ratio_threshold: Length factor relative to parent diameter
+        protect_largest_central: Whether to protect the largest central terminal vessel
+        min_diameter_vessel_protected: Minimum diameter to consider a vessel "large" and protect it
 
     Returns:
         int: Number of branches removed
@@ -1795,13 +1801,31 @@ def _remove_artefact_branches(
         artifact removal with anatomical structure preservation.
     """
     try:
+        if protect_largest_central:
+            logger.info(
+                "Starting artefact branch removal with protection for largest CENTRAL terminal vessel (diameter >= %.1f mm)",
+                min_diameter_vessel_protected,
+            )
+        else:
+            logger.info(
+                "Starting artefact branch removal with protection for largest terminal vessel (diameter >= %.1f mm)",
+                min_diameter_vessel_protected,
+            )
         # Count large CENTRAL terminal vessels before cleaning
         initial_large_terminals = _count_large_terminal_vessels(
-            graph, min_diameter=10.0, central_only=True, centrality_threshold=0.3
+            graph,
+            min_diameter=min_diameter_vessel_protected,
+            central_only=protect_largest_central,
+            centrality_threshold=0.3,
         )
-        logger.info(
-            f"Initial large CENTRAL terminal vessels (diameter >= 10mm, central 30%): {initial_large_terminals}"
-        )
+        if protect_largest_central:
+            logger.info(
+                f"Initial large CENTRAL terminal vessels (diameter >= 10mm, central 30%): {initial_large_terminals}"
+            )
+        else:
+            logger.info(
+                f"Initial large terminal vessels (diameter >= 10mm): {initial_large_terminals}"
+            )
 
         logger.debug("Finding branches to remove")
         to_remove = _find_branches_to_remove(
@@ -1822,18 +1846,32 @@ def _remove_artefact_branches(
 
         # Count large CENTRAL terminals after test removal
         final_large_terminals = _count_large_terminal_vessels(
-            test_graph, min_diameter=10.0, central_only=True, centrality_threshold=0.3
+            test_graph,
+            min_diameter=min_diameter_vessel_protected,
+            central_only=protect_largest_central,
+            centrality_threshold=0.3,
         )
-        logger.info(
-            f"Large CENTRAL terminal vessels after test removal: {final_large_terminals}"
-        )
+        if protect_largest_central:
+            logger.info(
+                f"Large CENTRAL terminal vessels after test removal: {final_large_terminals}"
+            )
+        else:
+            logger.info(
+                f"Large terminal vessels after test removal: {final_large_terminals}"
+            )
 
         # Only apply protection logic if we would end up with 0 large CENTRAL terminals
         if final_large_terminals < 1:
-            logger.warning(
-                f"Safety check triggered: Only {final_large_terminals} large CENTRAL terminals would remain. "
-                "Applying protection logic to preserve largest central terminal vessel."
-            )
+            if protect_largest_central:
+                logger.warning(
+                    f"Safety check triggered: Only {final_large_terminals} large CENTRAL terminals would remain. "
+                    "Applying protection logic to preserve largest central terminal vessel."
+                )
+            else:
+                logger.warning(
+                    f"Safety check triggered: Only {final_large_terminals} large terminals would remain. "
+                    "Applying protection logic to preserve largest terminal vessel."
+                )
 
             # Get large terminals and filter removal list
             large_terminals = _get_large_terminal_vessels(graph, min_diameter=10.0)
@@ -1841,7 +1879,7 @@ def _remove_artefact_branches(
                 to_remove,
                 large_terminals,
                 graph,
-                prefer_central=True,
+                prefer_central=protect_largest_central,
                 centrality_threshold=0.3,
             )
 
@@ -1851,10 +1889,14 @@ def _remove_artefact_branches(
                 )
                 to_remove = filtered_to_remove
         else:
-            logger.info(
-                f"Safety check passed: {final_large_terminals} large CENTRAL terminals will remain. Proceeding with normal cleaning."
-            )
-
+            if protect_largest_central:
+                logger.info(
+                    f"Safety check passed: {final_large_terminals} large CENTRAL terminals will remain. Proceeding with normal cleaning."
+                )
+            else:
+                logger.info(
+                    f"Safety check passed: {final_large_terminals} large terminals will remain. Proceeding with normal cleaning."
+                )
         # Apply the removals to the actual graph
         removed_ids = []
         for node, parent, edge_id in to_remove:
@@ -1968,6 +2010,8 @@ def clean_graph(
     save_cycle_skeletons: bool = False,
     cycle_skeletons_dir: Path | None = None,
     reference_skeleton_path: Path | None = None,
+    protect_largest_central: bool = True,
+    min_diameter_vessel_protected: float = 10.0,
 ) -> nx.Graph:
     """
     Execute comprehensive graph cleaning pipeline with statistics tracking.
@@ -1988,6 +2032,8 @@ def clean_graph(
         save_cycle_skeletons: If True, save skeletons of cycles before/after cleaning
         cycle_skeletons_dir: Directory to save cycle skeletons (required if save_cycle_skeletons=True)
         reference_skeleton_path: Path to reference skeleton for header/affine (required if save_cycle_skeletons=True)
+        protect_largest_central: Whether to protect the largest central terminal vessel during branch removal
+        min_diameter_vessel_protected: Minimum diameter (in mm) of vessels to protect during cleaning
 
     Returns:
         nx.Graph: Cleaned graph with artifacts removed and segments fused
@@ -2178,7 +2224,13 @@ def clean_graph(
 
         # Step 2: Remove artifact branches
         logger.info("Step 2: Removing artefact branches")
-        _remove_artefact_branches(graph, radius_ratio_threshold, length_ratio_threshold)
+        _remove_artefact_branches(
+            graph,
+            radius_ratio_threshold,
+            length_ratio_threshold,
+            protect_largest_central,
+            min_diameter_vessel_protected,
+        )
         current_stats = _get_detailed_stats(graph)
         _append_stats_to_csv(
             patient_stats_path,

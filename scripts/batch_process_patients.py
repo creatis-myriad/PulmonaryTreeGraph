@@ -342,6 +342,12 @@ def process_single_patient(
             obstruction_attr=processing_options.get(
                 "obstruction_attr", "volumetric_obstruction"
             ),
+            protect_largest_central=processing_options.get(
+                "protect_largest_central", True
+            ),
+            min_diameter_vessel_protected=processing_options.get(
+                "min_diameter_vessel_protected", 10.0
+            ),
         )
 
         # Copy enriched graphs to central directory if requested
@@ -899,6 +905,17 @@ Expected directory structure:
         help="Threshold for radius ratio to remove thin branches (default: 0.3)",
     )
     parser.add_argument(
+        "--protect-not-only-central-vessels",
+        action="store_false",
+        help="Protect all largest vessel during cleaning, not the central in priority which is a comportement adapted to pulmonary anatomy",
+    )
+    parser.add_argument(
+        "--min_diameter_vessel_protected",
+        type=float,
+        default=10.0,
+        help="Minimum diameter (in mm) of vessels to protect during cleaning (default: 10.0, adapted to pulmonary anatomy)",
+    )
+    parser.add_argument(
         "--diameter-threshold",
         type=float,
         default=0.7,
@@ -947,7 +964,7 @@ Expected directory structure:
     parser.add_argument(
         "--embolism-fusion-threshold",
         type=float,
-        default=5.0,
+        default=10.0,
         help="Distance threshold for fusing nearby embolism components",
     )
     parser.add_argument(
@@ -1207,6 +1224,8 @@ Expected directory structure:
         "compute_qanadli": args.compute_qanadli,
         "compute_mastora": args.compute_mastora,
         "obstruction_attr": args.obstruction_attr,
+        "protect_largest_central": args.protect_not_only_central_vessels,
+        "min_diameter_vessel_protected": args.min_diameter_vessel_protected,
     }
 
     # Handle the --compute-all-scores flag
