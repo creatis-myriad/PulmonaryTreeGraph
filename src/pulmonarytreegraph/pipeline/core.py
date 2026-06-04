@@ -259,6 +259,8 @@ def clean_vessel_graph(
     save_skeleton: bool = False,
     save_colored_volumes: list[str] | None = None,
     save_cycle_skeletons: bool = False,
+    protect_largest_central: bool = True,
+    min_diameter_vessel_protected: float = 10.0,
 ) -> dict[str, Any]:
     """
     Clean a graph by removing suspicious edges and short/thin branches.
@@ -275,6 +277,8 @@ def clean_vessel_graph(
     - coordinate_format: "voxel", "real", or "both"
     - save_skeleton: Whether to save both binary and edge_id colored skeleton from graph
     - save_colored_volumes: List of volume types to save ["edge_id", "level", "lobe"]
+    - protect_largest_central: Whether to protect the largest central vessel during cleaning, comportement adapted to pulmonary anatomy (default: True)
+    - min_diameter_vessel_protected: Minimum diameter (in mm) of vessels to protect during cleaning (default: 10.0, adapted to pulmonary anatomy)
 
     Returns:
     - Dictionary with cleaned graph paths and info
@@ -334,6 +338,8 @@ def clean_vessel_graph(
         save_cycle_skeletons=save_cycle_skeletons,
         cycle_skeletons_dir=cycle_skeletons_dir,
         reference_skeleton_path=original_skeleton_path,
+        protect_largest_central=protect_largest_central,
+        min_diameter_vessel_protected=min_diameter_vessel_protected,
     )
 
     logger.info(
@@ -1313,6 +1319,8 @@ def process_patient_complete_pipeline(
     compute_qanadli: bool = False,
     compute_mastora: bool = False,
     obstruction_attr: str = "volumetric_obstruction",
+    protect_largest_central: bool = True,
+    min_diameter_vessel_protected: float = 10.0,
 ) -> dict[str, Any]:
     """
     Complete end-to-end pipeline processing a patient from artery mask to final analysis.
@@ -1337,6 +1345,8 @@ def process_patient_complete_pipeline(
     - length_threshold: Maximum length/diameter ratio for trunk vessels (default: 1.5)
     - compute_transversal_obstruction: Compute transversal obstruction metrics
     - transversal_obstruction_kwargs: Additional parameters for transversal obstruction
+    - protect_largest_central: Whether to protect the largest central vessel during cleaning, comportement adapted to pulmonary anatomy (default: True)
+    - min_diameter_vessel_protected: Minimum diameter (in mm) of vessel to be protected during cleaning if protect_largest_central is True (default: 10mm)
 
     Returns:
     - Dictionary with all pipeline results
@@ -1464,6 +1474,8 @@ def process_patient_complete_pipeline(
                 save_skeleton=save_skeletons,
                 save_colored_volumes=clean_volumes,
                 save_cycle_skeletons=save_cycle_skeletons,
+                protect_largest_central=protect_largest_central,
+                min_diameter_vessel_protected=min_diameter_vessel_protected,
             )
             pipeline_results["graph_cleaning"] = clean_result
 
