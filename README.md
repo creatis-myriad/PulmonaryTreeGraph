@@ -10,7 +10,7 @@ A pipeline for extracting morphological and embolic biomarkers from masks of art
 - **Obstruction metrics**: Volumetric and transversal obstruction calculations
 - **Modular pipeline**: Step-by-step analysis with flexible execution
 
-## Installation
+## Installation on Linux
 
 Create a virtual environment using uv
 
@@ -18,6 +18,13 @@ Create a virtual environment using uv
 uv venv
 source .venv/bin/activate
 uv pip install -e .
+```
+
+or
+
+```bash
+uv sync
+source .venv/bin/activate
 ```
 
 ## Structure

@@ -99,8 +99,6 @@ def find_patients(
     # Check if required directories exist
     if not arteries_dir or not os.path.exists(arteries_dir):
         raise FileNotFoundError(f"Arteries mask directory not found: {arteries_dir}")
-    if not lungs_dir or not os.path.exists(lungs_dir):
-        raise FileNotFoundError(f"Lungs mask directory not found: {lungs_dir}")
 
     # Find all artery files
     artery_pattern = os.path.join(arteries_dir, "*.nii.gz")
