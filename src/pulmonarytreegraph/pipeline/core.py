@@ -1298,8 +1298,8 @@ def analyze_embolisms_complete(
 
 def process_patient_complete_pipeline(
     artery_mask_path: str,
-    lung_masks_dir: str,
     log_id: str,
+    lung_masks_dir: str | None = None,
     embolism_mask_path: str | None = None,
     output_dir: str | None = None,
     radius_ratio_threshold: float = 0.3,
@@ -1327,7 +1327,7 @@ def process_patient_complete_pipeline(
 
     Parameters:
     - artery_mask_path: Path to artery mask file
-    - lung_masks_dir: Directory containing lung mask files
+    - lung_masks_dir: Directory containing lung mask files (optional)
     - log_id: identifier for logging and global stats organization
     - embolism_mask_path: Path to embolism mask file (optional)
     - output_dir: Output directory (defaults to results/patient_name)

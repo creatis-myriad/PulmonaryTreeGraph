@@ -124,19 +124,20 @@ def find_patients(
         }
 
         # Look for lung masks directory
-        lung_masks_dir = os.path.join(lungs_dir, patient_id)
-        if os.path.exists(lung_masks_dir) and os.path.isdir(lung_masks_dir):
-            lung_files = glob.glob(os.path.join(lung_masks_dir, "*.nii.gz"))
-            if lung_files:
-                patient_info["lung_masks_dir"] = lung_masks_dir
+        if lungs_dir:
+            lung_masks_dir = os.path.join(lungs_dir, patient_id)
+            if os.path.exists(lung_masks_dir) and os.path.isdir(lung_masks_dir):
+                lung_files = glob.glob(os.path.join(lung_masks_dir, "*.nii.gz"))
+                if lung_files:
+                    patient_info["lung_masks_dir"] = lung_masks_dir
+                else:
+                    print(
+                        f"Warning: Lung masks directory exists but contains no .nii.gz files: {lung_masks_dir}"
+                    )
             else:
                 print(
-                    f"Warning: Lung masks directory exists but contains no .nii.gz files: {lung_masks_dir}"
+                    f"Warning: No lung masks directory found for patient {patient_id}: {lung_masks_dir}"
                 )
-        else:
-            print(
-                f"Warning: No lung masks directory found for patient {patient_id}: {lung_masks_dir}"
-            )
 
         # Look for embolism mask
         if embolies_dir:
@@ -178,12 +179,11 @@ def validate_patient_files(patient_info: dict[str, str]) -> dict[str, Any]:
         validation["valid"] = False
 
     if not patient_info["lung_masks_dir"]:
-        validation["errors"].append(
+        validation["warnings"].append(
             f"No lung masks directory found for patient {patient_id}"
         )
-        validation["valid"] = False
     elif not os.path.exists(patient_info["lung_masks_dir"]):
-        validation["errors"].append(
+        validation["warnings"].append(
             f"Lung masks directory does not exist: {patient_info['lung_masks_dir']}"
         )
         validation["valid"] = False
@@ -307,8 +307,8 @@ def process_single_patient(
         # Run the complete pipeline
         results = process_patient_complete_pipeline(
             artery_mask_path=patient_info["artery_mask"],
-            lung_masks_dir=patient_info["lung_masks_dir"],
             log_id=patient_info["log_id"],
+            lung_masks_dir=patient_info.get("lung_masks_dir"),
             embolism_mask_path=patient_info.get("embolism_mask"),
             output_dir=patient_output_dir,
             radius_ratio_threshold=processing_options.get(
