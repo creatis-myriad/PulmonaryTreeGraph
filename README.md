@@ -2,6 +2,27 @@
 
 A pipeline for extracting morphological and embolic biomarkers from masks of arteries, embolies and lungs segmented from CT pulmonary angiography (CTPA) scans. It creates graph-based models of the pulmonary vascular tree and enrich the graph with pulmonary embolism (PE) information.
 
+## Table of Contents
+
+- [Features](#features)
+- [Installation on Linux](#installation-on-linux)
+- [Structure](#structure)
+- [Pipeline Usage](#pipeline-usage)
+  - [Complete Pipeline](#complete-pipeline)
+    - [Batch Processing](#batch-processing)
+    - [Batch Processing Options](#batch-processing-options)
+  - [Step-by-Step Pipeline](#step-by-step-pipeline)
+    - [Step 1: Preprocessing](#step-1-preprocessing-1_preprocesspy)
+    - [Step 2: Graph Construction](#step-2-graph-construction-2_build_graphpy)
+    - [Step 3: Graph Cleaning](#step-3-graph-cleaning-3_clean_graphpy)
+    - [Step 4: Graph Orientation](#step-4-graph-orientation-4_orient_graphpy)
+    - [Step 5: Anatomical Labeling](#step-5-anatomical-labeling-5_label_graphpy)
+    - [Step 6: Embolic Analysis](#step-6-embolic-analysis-6_analyze_embolismpy)
+  - [Batch Report and Global Statistics Layout](#batch-report-and-global-statistics-layout)
+  - [Patient-level Scores](#patient-level-scores)
+- [Pipeline Outputs Summary](#pipeline-outputs-summary)
+- [Adapting the Pipeline to Other Vascular Structures](#adapting-the-pipeline-to-other-vascular-structures)
+
 ## Features
 
 - **Graph-based vascular modeling**: Complete pulmonary arterial tree representation
@@ -559,4 +580,12 @@ results/patient_001/
             ├── 001_embolism_1.nii.gz
             ├── 001_embolism_2.nii.gz
             └── ...
+```
+
+## Using the pipeline on other vascular structures
+
+Although PulmonaryTreeGraph was designed for pulmonary arterial trees, the modeling pipeline can be applied to other tubular vascular structures. When doing so, the anatomical assumptions built into the default settings,such as the protection of a single dominant central trunk, may not hold. The --protect-not-only-central-vessels option relax this assumption. You can use the pipeline until the "build", "clean" or "orient" step. I would recommand te followinf command, having in mind that the cleaning step of the pipeline will try and resolve cycles, that will be considered as errors :
+
+```bash
+python3 scripts/batch_process_patients.py --arteries-dir "./vessel_folder/" --images-dir "./images_foler/" --coordinate-format both --save-skeletons --save-cycle-skeletons --save-colored-volumes edge_id --output-dir "/home/desligneris/Documents/0_final_graphs" --stop-after orient --protect-not-only-central-vessels
 ```
