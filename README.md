@@ -21,7 +21,9 @@ A pipeline for extracting morphological and embolic biomarkers from masks of art
   - [Batch Report and Global Statistics Layout](#batch-report-and-global-statistics-layout)
   - [Patient-level Scores](#patient-level-scores)
 - [Pipeline Outputs Summary](#pipeline-outputs-summary)
-- [Adapting the Pipeline to Other Vascular Structures](#adapting-the-pipeline-to-other-vascular-structures)
+- [Using the pipeline on other vascular structures
+](#using-the-pipeline-on-other-vascular-structures
+)
 
 ## Features
 
