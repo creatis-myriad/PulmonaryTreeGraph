@@ -430,7 +430,10 @@ def copy_enriched_graphs(
     copied_files = []
 
     for filename in enriched_graph_files:
-        source_path = os.path.join(patient_output_dir, filename)
+        patient_graph_path = os.path.join(
+            patient_output_dir, "6_embolism_analysis/graph/"
+        )
+        source_path = os.path.join(patient_graph_path, filename)
 
         if os.path.exists(source_path):
             # Add patient ID prefix to avoid naming conflicts
